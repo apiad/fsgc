@@ -38,7 +38,6 @@ from typing import Any
 from send2trash import send2trash
 
 from fsgc.config import Signature
-from fsgc.scanner import DirectoryNode
 
 DEFAULT_UNSAFE_ROOTS: frozenset[Path] = frozenset(
     Path(p)
@@ -88,6 +87,7 @@ class DeletionRecord:
     freed_bytes: int = 0
     skip_reason: SkipReason | None = None
     error: str | None = None
+    review: bool = False
 
 
 @dataclass
@@ -151,19 +151,29 @@ class Sweeper:
         progress bar updates as soon as work finishes, while result.records
         is reassembled in submission order for stable downstream output.
         """
-        work: list[tuple[int, DirectoryNode, Signature, str]] = []
+        work: list[tuple[int, Path, int, Signature | None, str, bool]] = []
         for group in groups:
-            signature: Signature = group["signature"]
             group_name: str = group["name"]
-            for node in group["nodes"]:
-                work.append((len(work), node, signature, group_name))
+            is_review = bool(group.get("review", False))
+            if is_review:
+                # Behavioral group: items are bare Paths.
+                for path in group.get("behavioral_paths", []):
+                    size = path.stat().st_size if path.is_file() else 0
+                    work.append((len(work), Path(path), size, None, group_name, True))
+            else:
+                signature: Signature = group["signature"]
+                for node in group["nodes"]:
+                    work.append((len(work), node.path, node.size, signature, group_name, False))
 
         records_by_idx: dict[int, DeletionRecord] = {}
         if not work:
             return SweepResult()
 
         with ThreadPoolExecutor(max_workers=self.max_concurrency) as pool:
-            future_to_idx = {pool.submit(self._process_one, n, s, gn): i for i, n, s, gn in work}
+            future_to_idx = {
+                pool.submit(self._process_one, path, size, sig, gn, rv): i
+                for i, path, size, sig, gn, rv in work
+            }
             for future in as_completed(future_to_idx):
                 idx = future_to_idx[future]
                 record = future.result()
@@ -175,10 +185,14 @@ class Sweeper:
         return SweepResult(records=[records_by_idx[i] for i in range(len(work))])
 
     def _process_one(
-        self, node: DirectoryNode, signature: Signature, group_name: str
+        self,
+        path: Path,
+        node_size: int,
+        signature: Signature | None,
+        group_name: str,
+        review: bool,
     ) -> DeletionRecord:
-        path = node.path
-        record = DeletionRecord(path=path, signature_name=group_name)
+        record = DeletionRecord(path=path, signature_name=group_name, review=review)
 
         if self._is_unsafe_root(path):
             record.skip_reason = SkipReason.UNSAFE_ROOT
@@ -195,14 +209,15 @@ class Sweeper:
             record.action = Action.SKIPPED
             return record
 
-        if not self._reverify_sentinel(path, signature):
+        # Sentinel re-verification only applies to structural groups.
+        if signature is not None and not self._reverify_sentinel(path, signature):
             record.skip_reason = SkipReason.SENTINEL_MISSING
             record.action = Action.SKIPPED
             return record
 
         if self.dry_run:
             record.deleted = True
-            record.freed_bytes = node.size
+            record.freed_bytes = node_size
             record.action = Action.DRY_RUN
             return record
 
@@ -219,7 +234,7 @@ class Sweeper:
             return record
 
         record.deleted = True
-        record.freed_bytes = node.size
+        record.freed_bytes = node_size
         record.action = Action.TRASHED if self.trash else Action.DELETED
         return record
 
@@ -265,6 +280,7 @@ class Sweeper:
             "size_bytes": record.freed_bytes,
             "action": record.action.value,
             "detail": detail,
+            "review": record.review,
         }
         with self._journal_lock:
             self.journal_path.parent.mkdir(parents=True, exist_ok=True)

@@ -646,3 +646,70 @@ def test_sweep_empty_groups_returns_empty_result() -> None:
     result = Sweeper(dry_run=False, max_concurrency=8, unsafe_roots=frozenset()).sweep([])
     assert result.records == []
     assert result.total_freed_bytes == 0
+
+
+def test_sweeper_records_review_flag_on_group(tmp_path: Path) -> None:
+    """
+    A group marked with review=True flows that flag into every DeletionRecord
+    and (when journal_path is set) the JSONL journal line.
+    """
+    import json
+
+    from fsgc.sweeper import Sweeper
+
+    target = tmp_path / "doomed.bin"
+    target.write_bytes(b"x" * 1024)
+
+    group = {
+        "name": "Old Download",
+        "signature": None,
+        "review": True,
+        "nodes": [],
+        "matches": [],
+        "behavioral_paths": [target],
+    }
+    journal = tmp_path / "log.jsonl"
+    sweeper = Sweeper(
+        dry_run=False,
+        trash=False,
+        unsafe_roots=frozenset(),
+        journal_path=journal,
+    )
+    result = sweeper.sweep([group])
+
+    assert not target.exists()
+    assert len(result.deleted) == 1
+    assert result.deleted[0].review is True
+
+    lines = [json.loads(line) for line in journal.read_text().splitlines() if line]
+    assert lines[0]["review"] is True
+    assert lines[0]["signature"] == "Old Download"
+
+
+def test_sweeper_records_review_false_for_structural(tmp_path: Path) -> None:
+    """Structural groups omit the review flag (or set it to False)."""
+    import json
+
+    from fsgc.config import Recovery, Signature
+    from fsgc.scanner import DirectoryNode
+    from fsgc.sweeper import Sweeper
+
+    target = tmp_path / "__pycache__"
+    target.mkdir()
+    (target / "x.pyc").write_bytes(b"x")
+
+    node = DirectoryNode(path=target, size=1)
+    sig = Signature(name="Python Bytecode", pattern="**/__pycache__", recovery=Recovery.TRIVIAL)
+    group = {
+        "name": "Python Bytecode",
+        "signature": sig,
+        "nodes": [node],
+    }
+    journal = tmp_path / "log.jsonl"
+    sweeper = Sweeper(dry_run=False, trash=False, unsafe_roots=frozenset(), journal_path=journal)
+    result = sweeper.sweep([group])
+
+    assert len(result.deleted) == 1
+    assert result.deleted[0].review is False
+    lines = [json.loads(line) for line in journal.read_text().splitlines() if line]
+    assert lines[0]["review"] is False
