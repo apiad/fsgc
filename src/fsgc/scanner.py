@@ -9,6 +9,12 @@ from enum import Enum, auto
 from pathlib import Path
 from typing import Any
 
+from fsgc.behavior import (
+    BehavioralMatch,
+    BehavioralRule,
+    BehavioralRuleManager,
+    BehavioralSignal,
+)
 from fsgc.config import Signature
 from fsgc.trail import TopChild, TrailRecord, TrailStore, calculate_fingerprint
 
@@ -212,6 +218,7 @@ class Scanner:
         trail_store: TrailStore | None = None,
         trail_threshold_mb: int = 0,
         budget_seconds: float | None = None,
+        behavioral_manager: BehavioralRuleManager | None = None,
     ) -> None:
         self.root = root.resolve()
         self.stay_on_mount = stay_on_mount
@@ -233,6 +240,8 @@ class Scanner:
         self.budget_seconds: float | None = budget_seconds
         self._deadline: float | None = None
         self.timed_out: bool = False
+        self.behavioral_manager = behavioral_manager
+        self.behavioral_matches: list[BehavioralMatch] = []
 
     def _get_dev(self, path: Path) -> int:
         try:
@@ -448,6 +457,7 @@ class Scanner:
             for w in worker_tasks:
                 w.cancel()
 
+        self._finalize_behavioral_matches()
         yield root_node
 
     async def _process_directory(self, node: DirectoryNode) -> None:
@@ -512,6 +522,11 @@ class Scanner:
                     return
                 self.cache_misses += 1
 
+            # Behavioral stale_dir rules — one extra os.stat per candidate per rule.
+            if self.behavioral_manager is not None:
+                for rule in self.behavioral_manager.dir_rules:
+                    await self._check_behavioral_dir_rule(node, rule)
+
             # 3. No cache hit — pay for the full scandir.
             entries = await asyncio.to_thread(self._get_entries, node.path)
             node.entry_count = len(entries)
@@ -567,6 +582,43 @@ class Scanner:
 
         except (PermissionError, FileNotFoundError) as e:
             logger.debug(f"Skipping {node.path}: {e}")
+
+    async def _check_behavioral_dir_rule(self, node: DirectoryNode, rule: BehavioralRule) -> None:
+        """Apply a single stale_dir rule to a directory node."""
+        if rule.signal is BehavioralSignal.GIT_HEAD_MTIME:
+            head = node.path / ".git" / "HEAD"
+            try:
+                head_st = await asyncio.to_thread(os.stat, head)
+            except (PermissionError, FileNotFoundError):
+                return
+            age_seconds = time.time() - head_st.st_mtime
+            if age_seconds < rule.min_age_days * 86400:
+                return
+            # size_bytes is provisional — it'll be rewritten in the post-scan
+            # finalize pass once the subtree is fully walked.
+            self.behavioral_matches.append(
+                BehavioralMatch(
+                    path=node.path,
+                    rule_name=rule.name,
+                    size_bytes=node.size,
+                    age_days=int(age_seconds / 86400),
+                )
+            )
+
+    def _finalize_behavioral_matches(self) -> None:
+        """
+        Re-stat stale_dir match sizes from the walked tree. During detection
+        we wrote a provisional node.size; by scan end it's been rolled up.
+        """
+        for i, match in enumerate(self.behavioral_matches):
+            node = self.path_to_node.get(match.path)
+            if node is not None:
+                self.behavioral_matches[i] = BehavioralMatch(
+                    path=match.path,
+                    rule_name=match.rule_name,
+                    size_bytes=node.size,
+                    age_days=match.age_days,
+                )
 
     def _get_entries(self, path: Path) -> list[tuple[str, Path, bool, os.stat_result | None]]:
         """
