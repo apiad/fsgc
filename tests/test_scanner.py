@@ -193,6 +193,74 @@ def test_scanner_cache_miss_when_directory_changes(tmp_path: Path) -> None:
     store.close()
 
 
+def test_scanner_cache_hit_does_not_produce_negative_size(tmp_path: Path) -> None:
+    """
+    Regression: a cache hit used to set confirmed_size = total_size, but the
+    later update_metadata() in MCTS backprop would recompute it as
+    files_size + sum_child = 0 + 0 = 0 and propagate a *negative* delta to
+    the parent, producing negative reclaimed bytes in the UI.
+
+    The fix rolls the cached subtree size into files_size so the recompute
+    is idempotent. This test exercises a small tree with a cache hit at a
+    non-root node and asserts every node ends up with a non-negative size.
+    """
+    from fsgc.config import Recovery, Signature
+    from fsgc.engine import HeuristicEngine
+    from fsgc.trail import TrailStore
+
+    # Two .venv-shaped subtrees so we get two cache hits on the second scan.
+    for name in ("a", "b"):
+        venv = tmp_path / name / ".venv"
+        venv.mkdir(parents=True)
+        (venv / "pyvenv.cfg").write_text("home = /usr")
+        (venv / "lib").mkdir()
+        (venv / "lib" / "site-packages").mkdir()
+        (venv / "lib" / "site-packages" / "blob.bin").write_bytes(b"x" * 4096)
+
+    sigs = [Signature(name="V", pattern="**/.venv", recovery=Recovery.NETWORK)]
+    engine = HeuristicEngine()
+    store = TrailStore(db_path=tmp_path / "trails.db")
+
+    async def scan_once(scanner: Scanner) -> None:
+        async for _ in scanner.scan():
+            pass
+
+    # First scan: cold, populates the trail.
+    asyncio.run(
+        scan_once(
+            Scanner(
+                tmp_path, engine=engine, signatures=sigs, trail_store=store, trail_threshold_mb=0
+            )
+        )
+    )
+
+    # Second scan: warm. This is where the old bug surfaced — the cache hit
+    # restored confirmed_size, then update_metadata zeroed it and propagated
+    # a negative delta.
+    scanner2 = Scanner(
+        tmp_path, engine=engine, signatures=sigs, trail_store=store, trail_threshold_mb=0
+    )
+    asyncio.run(scan_once(scanner2))
+
+    # Every node in the tree must have non-negative size, confirmed_size and
+    # estimated_size after the warm scan.
+    def walk(node: DirectoryNode) -> list[DirectoryNode]:
+        out = [node]
+        for c in node.children.values():
+            out.extend(walk(c))
+        return out
+
+    assert scanner2.tree is not None
+    for n in walk(scanner2.tree):
+        assert n.size >= 0, f"{n.path} has negative size {n.size}"
+        assert n.confirmed_size >= 0, f"{n.path} has negative confirmed_size {n.confirmed_size}"
+        assert n.estimated_size >= 0, f"{n.path} has negative estimated_size {n.estimated_size}"
+
+    # And the root's total should still reflect both venvs' bytes.
+    assert scanner2.tree.confirmed_size > 0
+    store.close()
+
+
 # ── Wall-clock budget ──────────────────────────────────────────────────────
 
 

@@ -172,13 +172,16 @@ def _do_scan(
                     history.append((current_time, root_node.confirmed_size))
 
                     if current_time - last_update_time >= update_interval:
-                        # Calculate speed (avg over last 10s if possible, or since start)
+                        # Calculate speed (avg over last 10s if possible, or since start).
+                        # Clamp to >= 0: transient backprop deltas can briefly make
+                        # confirmed_size decrease (e.g. when a cache-hit subtree gets
+                        # re-rolled-up), and a negative speed display is just noise.
                         speed = 0.0
                         if len(history) > 1:
                             dt = history[-1][0] - history[0][0]
                             ds = history[-1][1] - history[0][1]
                             if dt > 0:
-                                speed = ds / dt
+                                speed = max(0.0, ds / dt)
 
                         # Phase 2: Hierarchy Summary (Traditional Scan view)
                         summary = summarize_tree(

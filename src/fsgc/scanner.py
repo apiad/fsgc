@@ -483,7 +483,15 @@ class Scanner:
             if self.trail_store is not None:
                 cached = self.trail_store.get(node.path)
                 if cached is not None and cached.fingerprint == current_fp:
-                    node.files_size = 0
+                    # Roll the entire cached subtree size into files_size so the
+                    # later update_metadata() pass in MCTS backprop recomputes
+                    # confirmed_size = total_size (no children walked → sum=0).
+                    # Without this, the recompute would zero out the restored
+                    # values and propagate a negative delta to the parent —
+                    # which surfaces as negative reclaimed bytes (and negative
+                    # MB/s, since the speed UI subtracts current from history).
+                    node.files_size = cached.total_size
+                    node.cached_size = cached.total_size
                     node.size = cached.total_size
                     node.confirmed_size = cached.total_size
                     node.estimated_size = cached.total_size
