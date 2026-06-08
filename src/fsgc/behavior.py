@@ -78,13 +78,11 @@ class BehavioralRuleManager:
         # Signal-kind compatibility: each signal is valid for exactly one kind.
         if kind is BehavioralKind.STALE_DIR and signal is not BehavioralSignal.GIT_HEAD_MTIME:
             raise ValueError(
-                f"rule {entry['name']!r}: signal {signal.value!r} is not "
-                f"valid for kind=stale_dir"
+                f"rule {entry['name']!r}: signal {signal.value!r} is not valid for kind=stale_dir"
             )
         if kind is BehavioralKind.STALE_FILE and signal is not BehavioralSignal.FILE_MTIME:
             raise ValueError(
-                f"rule {entry['name']!r}: signal {signal.value!r} is not "
-                f"valid for kind=stale_file"
+                f"rule {entry['name']!r}: signal {signal.value!r} is not valid for kind=stale_file"
             )
         # stale_dir rules cannot use file-only fields.
         if kind is BehavioralKind.STALE_DIR and (extensions or min_size_bytes):

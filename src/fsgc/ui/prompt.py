@@ -46,3 +46,18 @@ def prompt_confirm_action(trash: bool = True) -> str:
     ).execute()
 
     return cast(str, result)
+
+
+def prompt_confirm_review(num_items: int) -> bool:
+    """
+    Gate the sweep when REVIEW items are selected. The user must type
+    'yes' verbatim (lowercase, no whitespace) to proceed. Anything else
+    aborts the REVIEW portion of the sweep.
+    """
+    msg = (
+        f"You have {num_items} item(s) in REVIEW marked for collection.\n"
+        f"These are user data, not regenerable garbage.\n"
+        f"Type 'yes' to confirm:"
+    )
+    response = inquirer.text(message=msg).execute()  # type: ignore
+    return cast(str, response) == "yes"
