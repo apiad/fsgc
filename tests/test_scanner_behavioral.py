@@ -196,6 +196,42 @@ def test_scanner_respects_extensions(tmp_path: Path) -> None:
     assert scanner.behavioral_matches == []
 
 
+def test_scanner_tolerates_git_as_file(tmp_path: Path) -> None:
+    """
+    When `.git` is a regular file (a 'gitlink' pointing into a worktree or
+    submodule store), os.stat(.git/HEAD) raises NotADirectoryError. The
+    scanner must swallow that and simply skip the rule, not error.
+    """
+    repo = tmp_path / "worktree-checkout"
+    repo.mkdir()
+    (repo / ".git").write_text("gitdir: /elsewhere\n")
+    (repo / "code.py").write_bytes(b"x" * 4096)
+
+    mgr = _make_manager(
+        BehavioralRule(
+            name="Stale Code Project",
+            kind=BehavioralKind.STALE_DIR,
+            signal=BehavioralSignal.GIT_HEAD_MTIME,
+            min_age_days=180,
+        )
+    )
+    scanner = Scanner(tmp_path, behavioral_manager=mgr, budget_seconds=None)
+
+    async def run() -> None:
+        async for _ in scanner.scan():
+            pass
+
+    asyncio.run(run())
+
+    # No match, and the directory must have been fully walked despite the
+    # gitlink — code.py's bytes should be reflected in the tree's confirmed size.
+    assert scanner.behavioral_matches == []
+    scanner.tree.calculate_metadata()
+    repo_node = scanner.path_to_node[repo]
+    assert repo_node.is_processed
+    assert repo_node.confirmed_size >= 4096
+
+
 def test_scanner_stale_dir_match_survives_cache_roundtrip(tmp_path: Path) -> None:
     """
     A stale_dir match found on a cold scan must reappear on a warm-cache scan

@@ -601,7 +601,9 @@ class Scanner:
             head = node.path / ".git" / "HEAD"
             try:
                 head_st = await asyncio.to_thread(os.stat, head)
-            except (PermissionError, FileNotFoundError):
+            except OSError:
+                # ENOENT (no repo), EACCES (unreadable), ENOTDIR (.git is a
+                # gitlink file pointing into a worktree / submodule store).
                 return
             age_seconds = time.time() - head_st.st_mtime
             if age_seconds < rule.min_age_days * 86400:
