@@ -20,14 +20,15 @@ from rich.progress import (
 from rich.text import Text
 from rich.tree import Tree
 
-from fsgc.aggregator import group_by_signature, summarize_tree
+from fsgc.aggregator import group_behavioral_matches, group_by_signature, summarize_tree
+from fsgc.behavior import BehavioralRuleManager
 from fsgc.config import SignatureManager
 from fsgc.engine import HeuristicEngine
 from fsgc.scanner import DirectoryNode, Scanner
 from fsgc.sweeper import DeletionRecord, SkipReason, Sweeper
 from fsgc.trail import DEFAULT_DB_PATH, TrailStore
 from fsgc.ui.formatter import format_size, format_speed, render_summary_tree
-from fsgc.ui.prompt import prompt_confirm_action, prompt_for_deletion
+from fsgc.ui.prompt import prompt_confirm_action, prompt_confirm_review, prompt_for_deletion
 
 app = typer.Typer(name="fsgc", help="Heuristic-based filesystem scanner and garbage collector.")
 console = Console()
@@ -62,8 +63,18 @@ def sweep(
         max_concurrency=max_concurrency,
     )
 
-    total_nodes = sum(len(g["nodes"]) for g in selected_groups)
-    total_bytes = sum(n.size for g in selected_groups for n in g["nodes"])
+    def _group_item_count(g: dict[str, Any]) -> int:
+        if g.get("review"):
+            return len(g.get("behavioral_paths", []))
+        return len(g.get("nodes", []))
+
+    def _group_byte_total(g: dict[str, Any]) -> int:
+        if g.get("review"):
+            return int(g.get("size", 0))
+        return sum(n.size for n in g.get("nodes", []))
+
+    total_nodes = sum(_group_item_count(g) for g in selected_groups)
+    total_bytes = sum(_group_byte_total(g) for g in selected_groups)
 
     progress = Progress(
         SpinnerColumn(),
@@ -120,6 +131,27 @@ def sweep(
         console.print(f"[dim]Sweep journaled to {journal_path}[/]")
 
 
+def _render_proposal(
+    structural_groups: list[dict[str, Any]],
+    review_groups: list[dict[str, Any]],
+) -> None:
+    """Render the two-section proposal. Called before the interactive selection."""
+    console.print()
+    console.print("[bold green]🗑  Garbage (auto-suggested for cleanup)[/]")
+    for g in structural_groups:
+        console.print(
+            f"   {g['name']:<30} {format_size(g['size']):>10}   (score {g['avg_score']:.2f})"
+        )
+    if review_groups:
+        console.print()
+        console.print("[bold yellow]🔍 Review (suggested — never auto-checked, see and decide)[/]")
+        for g in review_groups:
+            console.print(
+                f"   {g['name']:<30} {format_size(g['size']):>10}   "
+                f"({len(g.get('matches', []))} item(s))"
+            )
+
+
 def _do_scan(
     path: Path,
     dry_run: bool,
@@ -140,6 +172,7 @@ def _do_scan(
 
     # Phase 0: Initialize Engine and Signatures
     sig_manager = SignatureManager()
+    behavioral_manager = BehavioralRuleManager()
     engine = HeuristicEngine(age_threshold_days=age_threshold)
     # Prime engine.directory_priors before the scan starts so Scanner.select_node
     # can use it on the very first selection.
@@ -154,6 +187,7 @@ def _do_scan(
         max_concurrency=workers,
         trail_store=trail_store,
         budget_seconds=budget_seconds,
+        behavioral_manager=behavioral_manager,
     )
 
     async def run_scan() -> DirectoryNode | None:
@@ -247,14 +281,16 @@ def _do_scan(
 
     # Phase 4: Aggregate (Grouping)
     groups = group_by_signature(node_scores)
+    review_groups = group_behavioral_matches(scanner.behavioral_matches)
 
     # Phase 5: Prompt (Interactive Selection)
-    if not groups:
-        console.print("\n[green]No garbage matching your signatures was found.[/]")
+    if not groups and not review_groups:
+        console.print("\n[green]Nothing surfaced for review or collection.[/]")
         return
 
     console.print("\n[bold yellow]Garbage Collection Proposal:[/]")
-    selected_groups = prompt_for_deletion(groups)
+    _render_proposal(groups, review_groups)
+    selected_groups = prompt_for_deletion(groups + review_groups)
 
     if not selected_groups:
         console.print("[yellow]No items selected. Aborting.[/]")
@@ -266,6 +302,9 @@ def _do_scan(
     if action == "abort":
         console.print("[red]Aborted.[/]")
     elif action == "dry":
+        for g in selected_groups:
+            if g.get("review"):
+                g["behavioral_paths"] = [m.path for m in g.get("matches", [])]
         sweep(
             selected_groups,
             dry_run=True,
@@ -274,6 +313,17 @@ def _do_scan(
             max_concurrency=workers,
         )
     elif action == "run":
+        # Sweeper consumes a flat list of paths for review groups.
+        for g in selected_groups:
+            if g.get("review"):
+                g["behavioral_paths"] = [m.path for m in g.get("matches", [])]
+        review_selected = [g for g in selected_groups if g.get("review")]
+        if review_selected:
+            if not prompt_confirm_review(
+                num_items=sum(len(g.get("behavioral_paths", [])) for g in review_selected)
+            ):
+                console.print("[yellow]REVIEW items not confirmed — excluding from sweep.[/]")
+                selected_groups = [g for g in selected_groups if not g.get("review")]
         sweep(
             selected_groups,
             dry_run=False,

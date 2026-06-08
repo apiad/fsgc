@@ -15,9 +15,16 @@ def prompt_for_deletion(groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
     choices = []
     for group in groups:
-        label = (
-            f"{group['name']} - {format_size(group['size'])} (Avg Score: {group['avg_score']:.2f})"
-        )
+        if group.get("review"):
+            label = (
+                f"[REVIEW] {group['name']} - {format_size(group['size'])} "
+                f"({len(group.get('matches', []))} item(s))"
+            )
+        else:
+            label = (
+                f"{group['name']} - {format_size(group['size'])} "
+                f"(Avg Score: {group['avg_score']:.2f})"
+            )
         choices.append({"name": label, "value": group, "enabled": group["auto_check"]})
 
     selected = inquirer.checkbox(  # type: ignore
