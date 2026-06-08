@@ -519,6 +519,16 @@ class Scanner:
                         node.signature = await asyncio.to_thread(
                             self.engine.get_matching_signature, node, self.signatures
                         )
+                    # Replay any stale_dir matches recorded for this node.
+                    for raw in cached.behavioral_matches:
+                        self.behavioral_matches.append(
+                            BehavioralMatch(
+                                path=node.path,
+                                rule_name=raw["rule_name"],
+                                size_bytes=int(raw["size_bytes"]),
+                                age_days=int(raw["age_days"]),
+                            )
+                        )
                     return
                 self.cache_misses += 1
 
@@ -695,6 +705,17 @@ class Scanner:
         ]
         node.top_subdirs = top_children
 
+        # Behavioral stale_dir matches that point at this exact node.
+        this_node_matches = [
+            {
+                "rule_name": m.rule_name,
+                "size_bytes": m.size_bytes,
+                "age_days": m.age_days,
+            }
+            for m in self.behavioral_matches
+            if m.path == node.path
+        ]
+
         # Use the fingerprint captured in _process_directory — must agree
         # exactly with what the next scan will recompute via os.stat.
         record = TrailRecord(
@@ -706,6 +727,7 @@ class Scanner:
             mtime=node.mtime,
             file_evidence=list(node.file_evidence),
             top_children=top_children,
+            behavioral_matches=this_node_matches,
         )
         # TrailStore's put goes to an in-memory dict; the bulk flush to
         # beaver happens once at close() so we never contend mid-scan.

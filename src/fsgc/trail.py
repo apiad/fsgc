@@ -25,7 +25,7 @@ directory's structural fingerprint (mtime + entry-count) is unchanged:
 import hashlib
 import struct
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -66,6 +66,7 @@ class TrailRecord:
     mtime: float
     file_evidence: list[str]
     top_children: list[TopChild]
+    behavioral_matches: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -79,6 +80,7 @@ class TrailRecord:
             "top_children": [
                 {"name": c.name, "score": c.score, "size": c.size} for c in self.top_children
             ],
+            "behavioral_matches": self.behavioral_matches,
         }
 
     @classmethod
@@ -95,6 +97,7 @@ class TrailRecord:
                 TopChild(name=c["name"], score=float(c["score"]), size=int(c["size"]))
                 for c in data.get("top_children", [])
             ],
+            behavioral_matches=list(data.get("behavioral_matches", [])),
         )
 
 

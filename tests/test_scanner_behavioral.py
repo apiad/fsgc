@@ -194,3 +194,63 @@ def test_scanner_respects_extensions(tmp_path: Path) -> None:
     asyncio.run(run())
 
     assert scanner.behavioral_matches == []
+
+
+def test_scanner_stale_dir_match_survives_cache_roundtrip(tmp_path: Path) -> None:
+    """
+    A stale_dir match found on a cold scan must reappear on a warm-cache scan
+    without re-stating the .git/HEAD file. This is how the REVIEW section
+    stays populated when fsgc skips walking known-stale subtrees.
+    """
+    from fsgc.trail import TrailStore
+
+    repo = tmp_path / "old-prototype"
+    head = repo / ".git" / "HEAD"
+    head.parent.mkdir(parents=True)
+    head.write_text("ref: refs/heads/main\n")
+    (repo / "blob.bin").write_bytes(b"x" * 4096)
+    ancient = time.time() - (200 * 86400)
+    os.utime(head, (ancient, ancient))
+
+    mgr = _make_manager(
+        BehavioralRule(
+            name="Stale Code Project",
+            kind=BehavioralKind.STALE_DIR,
+            signal=BehavioralSignal.GIT_HEAD_MTIME,
+            min_age_days=180,
+        )
+    )
+    store = TrailStore(db_path=tmp_path / "trails.db")
+
+    async def cold() -> Scanner:
+        s = Scanner(
+            tmp_path,
+            behavioral_manager=mgr,
+            trail_store=store,
+            trail_threshold_mb=0,
+            budget_seconds=None,
+        )
+        async for _ in s.scan():
+            pass
+        return s
+
+    s1 = asyncio.run(cold())
+    assert len(s1.behavioral_matches) == 1
+
+    async def warm() -> Scanner:
+        s = Scanner(
+            tmp_path,
+            behavioral_manager=mgr,
+            trail_store=store,
+            trail_threshold_mb=0,
+            budget_seconds=None,
+        )
+        async for _ in s.scan():
+            pass
+        return s
+
+    s2 = asyncio.run(warm())
+    matches = [m for m in s2.behavioral_matches if m.rule_name == "Stale Code Project"]
+    assert len(matches) == 1
+    assert matches[0].path == repo
+    store.close()
