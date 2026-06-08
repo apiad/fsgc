@@ -124,3 +124,21 @@ def test_rule_manager_rejects_wrong_signal_for_kind(tmp_path: Path) -> None:
 def test_rule_manager_empty_when_config_missing(tmp_path: Path) -> None:
     mgr = BehavioralRuleManager(config_path=tmp_path / "nope.yaml")
     assert mgr.rules == []
+
+
+def test_shipped_behaviors_yaml_loads() -> None:
+    """The catalog shipped in the package must parse without error."""
+    mgr = BehavioralRuleManager()  # uses default path
+    rule_names = {r.name for r in mgr.rules}
+    assert "Stale Code Project" in rule_names
+    assert "Old Download" in rule_names
+    assert "Forgotten Archive" in rule_names
+    assert "Old Large ML Weights" in rule_names
+
+    # Sanity: each rule is well-formed.
+    for rule in mgr.rules:
+        assert rule.min_age_days > 0
+        if rule.kind is BehavioralKind.STALE_FILE:
+            assert rule.signal is BehavioralSignal.FILE_MTIME
+        else:
+            assert rule.signal is BehavioralSignal.GIT_HEAD_MTIME

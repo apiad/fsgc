@@ -1,0 +1,59 @@
+# fsgc behavioral rules catalog v1.
+#
+# Each rule declares:
+#   name          — human-readable name (REVIEW group key).
+#   kind          — "stale_dir" or "stale_file".
+#   signal        — clock the rule reads:
+#                   "git_head_mtime" (stale_dir only) → mtime of <dir>/.git/HEAD
+#                   "file_mtime"     (stale_file only) → stat.st_mtime of the file
+#   min_age_days  — required gap between now and the signal's value.
+#   path_scope    — optional glob (Path.match semantics) restricting where the
+#                   rule applies.
+#   extensions    — optional list (file rules only); at least one must match.
+#   min_size_bytes — optional threshold (file rules only).
+#
+# Matches surface in the proposal's REVIEW section, never auto-checked,
+# gated by typed-yes confirmation. They are USER DATA, not garbage.
+
+rules:
+  - name: "Stale Code Project"
+    kind: stale_dir
+    signal: git_head_mtime
+    min_age_days: 180
+
+  - name: "Old Download"
+    kind: stale_file
+    signal: file_mtime
+    path_scope: "**/Downloads/*"
+    min_age_days: 90
+
+  - name: "Forgotten Archive"
+    kind: stale_file
+    signal: file_mtime
+    extensions:
+      - ".zip"
+      - ".tar.gz"
+      - ".tar.xz"
+      - ".tgz"
+      - ".dmg"
+      - ".iso"
+      - ".deb"
+      - ".AppImage"
+      - ".pkg"
+      - ".msi"
+    min_age_days: 90
+
+  - name: "Old Large ML Weights"
+    kind: stale_file
+    signal: file_mtime
+    extensions:
+      - ".pt"
+      - ".pth"
+      - ".safetensors"
+      - ".bin"
+      - ".gguf"
+      - ".ckpt"
+      - ".onnx"
+      - ".h5"
+    min_size_bytes: 524288000   # 500 MB
+    min_age_days: 180
