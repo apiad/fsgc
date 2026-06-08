@@ -30,15 +30,16 @@ def prompt_for_deletion(groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return cast(list[dict[str, Any]], selected)
 
 
-def prompt_confirm_action() -> str:
+def prompt_confirm_action(trash: bool = True) -> str:
     """
     Confirm the final action: Run Collection, Dry Run, or Abort.
     """
+    run_label = "Run Collection (Move to Trash)" if trash else "Run Collection (PERMANENT Deletion)"
     result = inquirer.select(  # type: ignore
         message="Choose action:",
         choices=[
-            {"name": "Run Collection (Permanent Deletion)", "value": "run"},
-            {"name": "Dry Run (Show what would be deleted)", "value": "dry"},
+            {"name": run_label, "value": "run"},
+            {"name": "Dry Run (Show what would be collected)", "value": "dry"},
             {"name": "Abort", "value": "abort"},
         ],
         default="dry",

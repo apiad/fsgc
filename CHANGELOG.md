@@ -12,11 +12,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Unsafe-root guard:** Sweeper refuses to delete the filesystem root, the user's home directory, and a built-in list of system paths (`/usr`, `/etc`, `/var`, `/boot`, `/bin`, `/lib`, …) regardless of signature match.
 - **Symlink guard:** Symlinks are never followed during sweep — the symlink itself is preserved and the target is untouched, even when the symlink's name matches a signature pattern.
 - **Sentinel re-verification at sweep time:** Each node is re-stat'd before deletion to confirm at least one signature sentinel is still present, catching the race where a sentinel disappeared between scan and confirm.
-- **Test coverage for the deletion path:** 11 new tests in `tests/test_sweeper.py` covering dry-run, run, unsafe-root, symlinks, sentinel re-verification, missing paths, OSError tolerance, and freed-bytes accounting.
+- **Trash-by-default deletion (`send2trash`):** Confirmed sweeps now move directories to the system trash instead of unlinking them. Opt out with `--permanent` for the prior rmtree behavior. The confirmation prompt distinguishes "Move to Trash" from "PERMANENT Deletion" so the user knows which mode is active.
+- **JSONL sweep journal:** Every record (trashed, deleted, dry-run, skipped, or errored) is appended as one JSON line to `~/.local/share/fsgc/sweep-log.jsonl` for audit + recovery. Disable with `--no-journal`.
+- **Test coverage for the deletion path:** 18 tests in `tests/test_sweeper.py` covering dry-run/run, unsafe-root, symlinks, sentinel re-verification, missing paths, OSError tolerance, freed-bytes accounting, trash vs permanent modes, trash failure handling, and journal output (single + multi-invocation + every-outcome).
 
 ### Changed
 - `aggregator.group_by_signature()` now includes the matched `Signature` in each group dict (used by the sweeper for sentinel re-verification).
-- Sweep output is per-record (deleted / skipped / error) with skip reasons surfaced to the user; reclaimed-bytes total now reflects bytes actually freed rather than scanned size.
+- Sweep output is per-record (trashed / deleted / skipped / errored) with skip reasons surfaced to the user; reclaimed-bytes total now reflects bytes actually freed rather than scanned size.
+
+### Dependencies
+- Added `send2trash >= 1.8` for cross-platform recoverable deletion.
 
 ## [0.3.0] - 2026-03-18
 

@@ -15,13 +15,16 @@ from fsgc.aggregator import group_by_signature, summarize_tree
 from fsgc.config import SignatureManager
 from fsgc.engine import HeuristicEngine
 from fsgc.scanner import DirectoryNode, Scanner
-from fsgc.sweeper import SkipReason, Sweeper
+from fsgc.sweeper import Action, SkipReason, Sweeper
 from fsgc.trail import GCTrail
 from fsgc.ui.formatter import format_size, format_speed, render_summary_tree
 from fsgc.ui.prompt import prompt_confirm_action, prompt_for_deletion
 
 app = typer.Typer(name="fsgc", help="Heuristic-based filesystem scanner and garbage collector.")
 console = Console()
+
+
+DEFAULT_JOURNAL_PATH = Path.home() / ".local" / "share" / "fsgc" / "sweep-log.jsonl"
 
 
 _SKIP_REASON_LABELS: dict[SkipReason, str] = {
@@ -31,37 +34,55 @@ _SKIP_REASON_LABELS: dict[SkipReason, str] = {
     SkipReason.MISSING: "no longer exists",
 }
 
+_ACTION_LABELS: dict[Action, tuple[str, str]] = {
+    Action.DRY_RUN: ("DRY RUN:", "yellow"),
+    Action.TRASHED: ("Trashed:", "green"),
+    Action.DELETED: ("Deleted:", "green"),
+}
 
-def sweep(selected_groups: list[dict[str, Any]], dry_run: bool = True) -> None:
+
+def sweep(
+    selected_groups: list[dict[str, Any]],
+    dry_run: bool = True,
+    trash: bool = True,
+    journal_path: Path | None = None,
+) -> None:
     """
     Perform the actual or simulated deletion of selected garbage nodes via Sweeper.
     """
-    result = Sweeper(dry_run=dry_run).sweep(selected_groups)
-
-    prefix = "DRY RUN:" if dry_run else "Deleted:"
-    verb_color = "yellow" if dry_run else "green"
+    result = Sweeper(
+        dry_run=dry_run,
+        trash=trash,
+        journal_path=journal_path,
+    ).sweep(selected_groups)
 
     current_group: str | None = None
     for record in result.records:
         if record.signature_name != current_group:
             console.print(f"\n[bold]Collecting: {record.signature_name}[/]")
             current_group = record.signature_name
-        if record.deleted:
-            console.print(
-                f"[{verb_color}]{prefix}[/] {record.path} ({format_size(record.freed_bytes)})"
-            )
+        if record.action in _ACTION_LABELS:
+            prefix, color = _ACTION_LABELS[record.action]
+            console.print(f"[{color}]{prefix}[/] {record.path} ({format_size(record.freed_bytes)})")
         elif record.skip_reason is not None:
             reason = _SKIP_REASON_LABELS[record.skip_reason]
             console.print(f"[blue]Skipped:[/] {record.path} ({reason})")
         elif record.error is not None:
             console.print(f"[red]Error deleting {record.path}: {record.error}[/]")
 
-    status = "Simulated" if dry_run else "Successfully"
-    console.print(f"\n[bold green]{status} reclaimed {format_size(result.total_freed_bytes)}![/]")
+    if dry_run:
+        verb = "Simulated"
+    elif trash:
+        verb = "Moved to trash"
+    else:
+        verb = "Permanently reclaimed"
+    console.print(f"\n[bold green]{verb} {format_size(result.total_freed_bytes)}![/]")
     if result.skipped:
         console.print(f"[blue]Skipped {len(result.skipped)} item(s) for safety.[/]")
     if result.errors:
         console.print(f"[red]{len(result.errors)} deletion(s) failed.[/]")
+    if journal_path is not None and (result.deleted or result.skipped or result.errors):
+        console.print(f"[dim]Sweep journaled to {journal_path}[/]")
 
 
 def _do_scan(
@@ -73,6 +94,8 @@ def _do_scan(
     limit: int,
     age_threshold: int,
     workers: int,
+    trash: bool,
+    journal_path: Path | None,
 ) -> None:
     path = path.resolve()
     console.print(f"[bold blue]Scanning[/] {path}...")
@@ -170,14 +193,14 @@ def _do_scan(
         return
 
     # Phase 6: Sweep (Final Action)
-    action = "dry" if dry_run else prompt_confirm_action()
+    action = "dry" if dry_run else prompt_confirm_action(trash=trash)
 
     if action == "abort":
         console.print("[red]Aborted.[/]")
     elif action == "dry":
-        sweep(selected_groups, dry_run=True)
+        sweep(selected_groups, dry_run=True, trash=trash, journal_path=journal_path)
     elif action == "run":
-        sweep(selected_groups, dry_run=False)
+        sweep(selected_groups, dry_run=False, trash=trash, journal_path=journal_path)
 
 
 @app.command()
@@ -202,11 +225,37 @@ def scan(
     workers: Annotated[
         int, typer.Option("--workers", "-w", help="Number of concurrent workers.")
     ] = 8,
+    trash: Annotated[
+        bool,
+        typer.Option(
+            "--trash/--permanent",
+            help="Move to system trash (default, recoverable) vs permanent rmtree.",
+        ),
+    ] = True,
+    no_journal: Annotated[
+        bool,
+        typer.Option(
+            "--no-journal",
+            help=f"Disable the sweep audit log (default: append to {DEFAULT_JOURNAL_PATH}).",
+        ),
+    ] = False,
 ) -> None:
     """
     Scans a directory for garbage and proposes collection.
     """
-    _do_scan(path, dry_run, min_size, depth, min_percent, limit, age_threshold, workers)
+    journal_path = None if no_journal else DEFAULT_JOURNAL_PATH
+    _do_scan(
+        path,
+        dry_run,
+        min_size,
+        depth,
+        min_percent,
+        limit,
+        age_threshold,
+        workers,
+        trash,
+        journal_path,
+    )
 
 
 def get_inspect_label(path: Path, trail: GCTrail) -> Text:

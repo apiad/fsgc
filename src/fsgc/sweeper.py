@@ -12,17 +12,28 @@ gone from disk". Three classes of safety guard run on every node:
     confirms at least one signature sentinel is still present, catching
     the race where the scan saw a sentinel that disappeared by confirm time.
 
+Default deletion is to the system trash (send2trash) so confirmed sweeps
+remain recoverable. Permanent unlink/rmtree is opt-in via trash=False.
+
+Every record (deleted, skipped, or errored) is appended as one JSONL line
+to journal_path when configured, providing an audit trail.
+
 Returns a structured SweepResult so the CLI can format output independently
 and tests can assert on machine-readable records.
 """
 
+import datetime
+import json
 import os
 import shutil
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
 from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any
+
+from send2trash import send2trash
 
 from fsgc.config import Signature
 from fsgc.scanner import DirectoryNode
@@ -58,10 +69,19 @@ class SkipReason(Enum):
     MISSING = "missing"
 
 
+class Action(Enum):
+    TRASHED = "trashed"
+    DELETED = "deleted"
+    DRY_RUN = "dry-run"
+    SKIPPED = "skipped"
+    ERRORED = "errored"
+
+
 @dataclass
 class DeletionRecord:
     path: Path
     signature_name: str
+    action: Action = Action.SKIPPED
     deleted: bool = False
     freed_bytes: int = 0
     skip_reason: SkipReason | None = None
@@ -89,14 +109,24 @@ class SweepResult:
         return sum(r.freed_bytes for r in self.deleted)
 
 
+def _utcnow() -> datetime.datetime:
+    return datetime.datetime.now(datetime.UTC)
+
+
 class Sweeper:
     def __init__(
         self,
         *,
         dry_run: bool = True,
+        trash: bool = True,
         unsafe_roots: frozenset[Path] | None = None,
+        journal_path: Path | None = None,
+        now: Callable[[], datetime.datetime] | None = None,
     ) -> None:
         self.dry_run = dry_run
+        self.trash = trash
+        self.journal_path = journal_path
+        self._now = now or _utcnow
         roots = DEFAULT_UNSAFE_ROOTS if unsafe_roots is None else unsafe_roots
         self._unsafe_roots: set[Path] = {self._safe_resolve(p) for p in roots}
         self._unsafe_roots.add(self._safe_resolve(Path.home()))
@@ -109,6 +139,7 @@ class Sweeper:
             for node in group["nodes"]:
                 record = self._process_one(node, signature, group_name)
                 result.records.append(record)
+                self._journal(record)
         return result
 
     def _process_one(
@@ -119,36 +150,45 @@ class Sweeper:
 
         if self._is_unsafe_root(path):
             record.skip_reason = SkipReason.UNSAFE_ROOT
+            record.action = Action.SKIPPED
             return record
 
         if path.is_symlink():
             record.skip_reason = SkipReason.SYMLINK
+            record.action = Action.SKIPPED
             return record
 
         if not path.exists():
             record.skip_reason = SkipReason.MISSING
+            record.action = Action.SKIPPED
             return record
 
         if not self._reverify_sentinel(path, signature):
             record.skip_reason = SkipReason.SENTINEL_MISSING
+            record.action = Action.SKIPPED
             return record
 
         if self.dry_run:
             record.deleted = True
             record.freed_bytes = node.size
+            record.action = Action.DRY_RUN
             return record
 
         try:
-            if path.is_dir():
+            if self.trash:
+                send2trash(path)
+            elif path.is_dir():
                 shutil.rmtree(path)
             else:
                 path.unlink()
         except OSError as e:
             record.error = f"{type(e).__name__}: {e}"
+            record.action = Action.ERRORED
             return record
 
         record.deleted = True
         record.freed_bytes = node.size
+        record.action = Action.TRASHED if self.trash else Action.DELETED
         return record
 
     def _is_unsafe_root(self, path: Path) -> bool:
@@ -177,3 +217,23 @@ class Sweeper:
                 if name == sentinel or fnmatch(name, sentinel):
                     return True
         return False
+
+    def _journal(self, record: DeletionRecord) -> None:
+        if self.journal_path is None:
+            return
+        detail: str | None = None
+        if record.skip_reason is not None:
+            detail = record.skip_reason.value
+        elif record.error is not None:
+            detail = record.error
+        entry = {
+            "timestamp": self._now().isoformat(),
+            "path": str(record.path),
+            "signature": record.signature_name,
+            "size_bytes": record.freed_bytes,
+            "action": record.action.value,
+            "detail": detail,
+        }
+        self.journal_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.journal_path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")

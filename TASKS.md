@@ -20,7 +20,6 @@ Put done tasks into the Archive.
 
 ### Sweep safety + speed (from 2026-06-08 audit)
 
-- [ ] **Slice B — Recoverability:** Integrate `send2trash` for default-to-trash deletion; `--permanent` opt-in. Add JSONL sweep log at `~/.local/share/fsgc/sweep-log.jsonl` (timestamp, path, signature, sentinels-seen, size, dry/run) for audit + recovery.
 - [ ] **Slice C — Speed:** Bounded-async parallel sweep across nodes (mirror scan's `max_concurrency=workers`); Rich `Progress` bar with bytes/s during deletion so large-tree deletes aren't opaque.
 - [ ] Drop the `auto_check = avg_score > 0.8` default in `aggregator.group_by_signature` — pre-selected checkboxes combine dangerously with the one-keystroke "Run Collection" option in `prompt_confirm_action`. Either drop auto-check or require a typed `yes` to switch from dry-run to run.
 - [ ] Investigate `subprocess.run(["rm", "-rf", path])` fast-path for million-file trees; only worth doing after Slice C parallel sweep lands. Measure before adopting.
@@ -29,6 +28,8 @@ Put done tasks into the Archive.
 
 ## Archive
 
+- [x] **Slice B — Recoverability:** `send2trash` default + `--permanent` opt-in; JSONL sweep log at `~/.local/share/fsgc/sweep-log.jsonl` with `--no-journal` opt-out. (2026-06-08)
+- [x] **Slice A — Cleanup safety net:** Extract `Sweeper` from `__main__.sweep()` with unsafe-root + symlink + sentinel-reverify guards; 11 tests covering the previously-untested deletion path. (2026-06-08)
 - [x] Implement CI/CD workflow for automated testing and PyPI publication (via `uv publish`). (2026-03-18)
 - [x] Create comprehensive project documentation in `docs/` (Overview, Deployment, Design, Development). (2026-03-18) (@apiad) (See plan: plans/documentation.md)
 - [x] Implement incremental metadata propagation for wide-tree performance. (2026-03-18) (@apiad) (See plan: plans/fix-scanner-performance.md)
