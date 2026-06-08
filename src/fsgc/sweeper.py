@@ -1,0 +1,179 @@
+"""
+Sweeper — the deletion stage of fsgc, isolated and tested.
+
+Owns every decision between "user confirmed the collection" and "files are
+gone from disk". Three classes of safety guard run on every node:
+
+  * unsafe-root guard: refuses filesystem root, configured forbidden paths,
+    and the user's home directory (Path.home() itself, not its children).
+  * symlink guard: refuses to follow symlinks; the target is preserved
+    even when the link's name matches a signature pattern.
+  * sentinel re-verification: re-stats the directory at sweep time and
+    confirms at least one signature sentinel is still present, catching
+    the race where the scan saw a sentinel that disappeared by confirm time.
+
+Returns a structured SweepResult so the CLI can format output independently
+and tests can assert on machine-readable records.
+"""
+
+import os
+import shutil
+from dataclasses import dataclass, field
+from enum import Enum
+from fnmatch import fnmatch
+from pathlib import Path
+from typing import Any
+
+from fsgc.config import Signature
+from fsgc.scanner import DirectoryNode
+
+DEFAULT_UNSAFE_ROOTS: frozenset[Path] = frozenset(
+    Path(p)
+    for p in (
+        "/",
+        "/bin",
+        "/boot",
+        "/dev",
+        "/etc",
+        "/home",
+        "/lib",
+        "/lib64",
+        "/opt",
+        "/proc",
+        "/root",
+        "/run",
+        "/sbin",
+        "/srv",
+        "/sys",
+        "/usr",
+        "/var",
+    )
+)
+
+
+class SkipReason(Enum):
+    UNSAFE_ROOT = "unsafe-root"
+    SYMLINK = "symlink"
+    SENTINEL_MISSING = "sentinel-missing"
+    MISSING = "missing"
+
+
+@dataclass
+class DeletionRecord:
+    path: Path
+    signature_name: str
+    deleted: bool = False
+    freed_bytes: int = 0
+    skip_reason: SkipReason | None = None
+    error: str | None = None
+
+
+@dataclass
+class SweepResult:
+    records: list[DeletionRecord] = field(default_factory=list)
+
+    @property
+    def deleted(self) -> list[DeletionRecord]:
+        return [r for r in self.records if r.deleted]
+
+    @property
+    def skipped(self) -> list[DeletionRecord]:
+        return [r for r in self.records if r.skip_reason is not None]
+
+    @property
+    def errors(self) -> list[DeletionRecord]:
+        return [r for r in self.records if r.error is not None]
+
+    @property
+    def total_freed_bytes(self) -> int:
+        return sum(r.freed_bytes for r in self.deleted)
+
+
+class Sweeper:
+    def __init__(
+        self,
+        *,
+        dry_run: bool = True,
+        unsafe_roots: frozenset[Path] | None = None,
+    ) -> None:
+        self.dry_run = dry_run
+        roots = DEFAULT_UNSAFE_ROOTS if unsafe_roots is None else unsafe_roots
+        self._unsafe_roots: set[Path] = {self._safe_resolve(p) for p in roots}
+        self._unsafe_roots.add(self._safe_resolve(Path.home()))
+
+    def sweep(self, groups: list[dict[str, Any]]) -> SweepResult:
+        result = SweepResult()
+        for group in groups:
+            signature: Signature = group["signature"]
+            group_name: str = group["name"]
+            for node in group["nodes"]:
+                record = self._process_one(node, signature, group_name)
+                result.records.append(record)
+        return result
+
+    def _process_one(
+        self, node: DirectoryNode, signature: Signature, group_name: str
+    ) -> DeletionRecord:
+        path = node.path
+        record = DeletionRecord(path=path, signature_name=group_name)
+
+        if self._is_unsafe_root(path):
+            record.skip_reason = SkipReason.UNSAFE_ROOT
+            return record
+
+        if path.is_symlink():
+            record.skip_reason = SkipReason.SYMLINK
+            return record
+
+        if not path.exists():
+            record.skip_reason = SkipReason.MISSING
+            return record
+
+        if not self._reverify_sentinel(path, signature):
+            record.skip_reason = SkipReason.SENTINEL_MISSING
+            return record
+
+        if self.dry_run:
+            record.deleted = True
+            record.freed_bytes = node.size
+            return record
+
+        try:
+            if path.is_dir():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+        except OSError as e:
+            record.error = f"{type(e).__name__}: {e}"
+            return record
+
+        record.deleted = True
+        record.freed_bytes = node.size
+        return record
+
+    def _is_unsafe_root(self, path: Path) -> bool:
+        resolved = self._safe_resolve(path)
+        if resolved == resolved.parent:
+            return True
+        return resolved in self._unsafe_roots
+
+    @staticmethod
+    def _safe_resolve(path: Path) -> Path:
+        try:
+            return path.resolve()
+        except OSError:
+            return path
+
+    @staticmethod
+    def _reverify_sentinel(path: Path, signature: Signature) -> bool:
+        if not signature.sentinels:
+            return True
+        try:
+            entries = [entry.name for entry in os.scandir(path)]
+        except OSError:
+            return False
+        for sentinel in signature.sentinels:
+            for name in entries:
+                if name == sentinel or fnmatch(name, sentinel):
+                    return True
+        return False

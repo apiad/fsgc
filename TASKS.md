@@ -16,6 +16,14 @@ Put done tasks into the Archive.
 
 ## Active Tasks
 
+- [ ] Update PyPI trusted-publisher config from `apiad/gc` → `apiad/fsgc` before the next release (https://pypi.org/manage/project/fsgc/settings/publishing/). The GitHub redirect keeps clones working but `uv publish` will fail OIDC verification on the next tag until this is changed. (See `know-how/releasing.md`.)
+
+### Sweep safety + speed (from 2026-06-08 audit)
+
+- [ ] **Slice B — Recoverability:** Integrate `send2trash` for default-to-trash deletion; `--permanent` opt-in. Add JSONL sweep log at `~/.local/share/fsgc/sweep-log.jsonl` (timestamp, path, signature, sentinels-seen, size, dry/run) for audit + recovery.
+- [ ] **Slice C — Speed:** Bounded-async parallel sweep across nodes (mirror scan's `max_concurrency=workers`); Rich `Progress` bar with bytes/s during deletion so large-tree deletes aren't opaque.
+- [ ] Drop the `auto_check = avg_score > 0.8` default in `aggregator.group_by_signature` — pre-selected checkboxes combine dangerously with the one-keystroke "Run Collection" option in `prompt_confirm_action`. Either drop auto-check or require a typed `yes` to switch from dry-run to run.
+- [ ] Investigate `subprocess.run(["rm", "-rf", path])` fast-path for million-file trees; only worth doing after Slice C parallel sweep lands. Measure before adopting.
 
 ---
 

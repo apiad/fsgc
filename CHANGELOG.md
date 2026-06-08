@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Sweeper module (`fsgc.sweeper`):** Extracted the deletion path into a dedicated `Sweeper` class with structured `SweepResult` / `DeletionRecord` records, replacing the inline loop in `__main__.sweep()`. The CLI now formats results; the sweeper decides what to delete.
+- **Unsafe-root guard:** Sweeper refuses to delete the filesystem root, the user's home directory, and a built-in list of system paths (`/usr`, `/etc`, `/var`, `/boot`, `/bin`, `/lib`, …) regardless of signature match.
+- **Symlink guard:** Symlinks are never followed during sweep — the symlink itself is preserved and the target is untouched, even when the symlink's name matches a signature pattern.
+- **Sentinel re-verification at sweep time:** Each node is re-stat'd before deletion to confirm at least one signature sentinel is still present, catching the race where a sentinel disappeared between scan and confirm.
+- **Test coverage for the deletion path:** 11 new tests in `tests/test_sweeper.py` covering dry-run, run, unsafe-root, symlinks, sentinel re-verification, missing paths, OSError tolerance, and freed-bytes accounting.
+
+### Changed
+- `aggregator.group_by_signature()` now includes the matched `Signature` in each group dict (used by the sweeper for sentinel re-verification).
+- Sweep output is per-record (deleted / skipped / error) with skip reasons surfaced to the user; reclaimed-bytes total now reflects bytes actually freed rather than scanned size.
+
 ## [0.3.0] - 2026-03-18
 
 ### Added

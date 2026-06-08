@@ -1,6 +1,5 @@
 import asyncio
 import datetime
-import shutil
 import time
 from collections import deque
 from pathlib import Path
@@ -16,6 +15,7 @@ from fsgc.aggregator import group_by_signature, summarize_tree
 from fsgc.config import SignatureManager
 from fsgc.engine import HeuristicEngine
 from fsgc.scanner import DirectoryNode, Scanner
+from fsgc.sweeper import SkipReason, Sweeper
 from fsgc.trail import GCTrail
 from fsgc.ui.formatter import format_size, format_speed, render_summary_tree
 from fsgc.ui.prompt import prompt_confirm_action, prompt_for_deletion
@@ -24,33 +24,44 @@ app = typer.Typer(name="fsgc", help="Heuristic-based filesystem scanner and garb
 console = Console()
 
 
+_SKIP_REASON_LABELS: dict[SkipReason, str] = {
+    SkipReason.UNSAFE_ROOT: "protected system path",
+    SkipReason.SYMLINK: "symlink (target preserved)",
+    SkipReason.SENTINEL_MISSING: "sentinel disappeared since scan",
+    SkipReason.MISSING: "no longer exists",
+}
+
+
 def sweep(selected_groups: list[dict[str, Any]], dry_run: bool = True) -> None:
     """
-    Perform the actual or simulated deletion of selected garbage nodes.
+    Perform the actual or simulated deletion of selected garbage nodes via Sweeper.
     """
-    total_reclaimed = 0
+    result = Sweeper(dry_run=dry_run).sweep(selected_groups)
 
-    for group in selected_groups:
-        console.print(f"\n[bold]Collecting: {group['name']}[/]")
-        for node in group["nodes"]:
-            if dry_run:
-                console.print(
-                    f"[yellow]DRY RUN:[/] Would delete {node.path} ({format_size(node.size)})"
-                )
-                total_reclaimed += node.size
-            else:
-                try:
-                    if node.path.is_dir():
-                        shutil.rmtree(node.path)
-                    else:
-                        node.path.unlink()
-                    console.print(f"[green]Deleted:[/] {node.path}")
-                    total_reclaimed += node.size
-                except Exception as e:
-                    console.print(f"[red]Error deleting {node.path}: {e}[/]")
+    prefix = "DRY RUN:" if dry_run else "Deleted:"
+    verb_color = "yellow" if dry_run else "green"
+
+    current_group: str | None = None
+    for record in result.records:
+        if record.signature_name != current_group:
+            console.print(f"\n[bold]Collecting: {record.signature_name}[/]")
+            current_group = record.signature_name
+        if record.deleted:
+            console.print(
+                f"[{verb_color}]{prefix}[/] {record.path} ({format_size(record.freed_bytes)})"
+            )
+        elif record.skip_reason is not None:
+            reason = _SKIP_REASON_LABELS[record.skip_reason]
+            console.print(f"[blue]Skipped:[/] {record.path} ({reason})")
+        elif record.error is not None:
+            console.print(f"[red]Error deleting {record.path}: {record.error}[/]")
 
     status = "Simulated" if dry_run else "Successfully"
-    console.print(f"\n[bold green]{status} reclaimed {format_size(total_reclaimed)}![/]")
+    console.print(f"\n[bold green]{status} reclaimed {format_size(result.total_freed_bytes)}![/]")
+    if result.skipped:
+        console.print(f"[blue]Skipped {len(result.skipped)} item(s) for safety.[/]")
+    if result.errors:
+        console.print(f"[red]{len(result.errors)} deletion(s) failed.[/]")
 
 
 def _do_scan(

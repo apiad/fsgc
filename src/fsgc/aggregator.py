@@ -115,6 +115,7 @@ def group_by_signature(
         if signature.name not in groups:
             groups[signature.name] = {
                 "name": signature.name,
+                "signature": signature,
                 "size": 0,
                 "scores": [],
                 "nodes": [],
