@@ -1,10 +1,10 @@
-# 🤖 Garbage Collector (gc)
+# 🤖 fsgc — Filesystem Garbage Collector
 
 <div align="center">
 
-[![Release](https://img.shields.io/badge/Release-v0.3.0-blue.svg?style=for-the-badge)](https://github.com/apiad/gc/releases)
-[![License](https://img.shields.io/github/license/apiad/gc?style=for-the-badge&color=success)](LICENSE)
-[![Maintenance](https://img.shields.io/badge/Maintained%3F-yes-green.svg?style=for-the-badge)](https://github.com/apiad/gc/graphs/commit-activity)
+[![Release](https://img.shields.io/badge/Release-v0.3.0-blue.svg?style=for-the-badge)](https://github.com/apiad/fsgc/releases)
+[![License](https://img.shields.io/github/license/apiad/fsgc?style=for-the-badge&color=success)](LICENSE)
+[![Maintenance](https://img.shields.io/badge/Maintained%3F-yes-green.svg?style=for-the-badge)](https://github.com/apiad/fsgc/graphs/commit-activity)
 
 **Clean your filesystem with precision.**
 
@@ -32,8 +32,8 @@ pipx install fsgc
 For developers:
 ```bash
 # Clone the repository
-git clone https://github.com/apiad/gc.git
-cd gc
+git clone https://github.com/apiad/fsgc.git
+cd fsgc
 
 # Install dependencies and build the project
 uv sync

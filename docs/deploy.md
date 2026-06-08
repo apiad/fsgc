@@ -26,8 +26,8 @@ To set up a local development environment, use `uv`:
 
 ```bash
 # Clone the repository
-git clone https://github.com/apiad/gc.git
-cd gc
+git clone https://github.com/apiad/fsgc.git
+cd fsgc
 
 # Synchronize virtual environment and dependencies
 uv sync

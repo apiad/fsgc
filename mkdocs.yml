@@ -1,6 +1,6 @@
 site_name: fsgc
 site_description: A stochastic filesystem garbage collector using Monte Carlo Tree Search.
-repo_url: https://github.com/apiad/gc
+repo_url: https://github.com/apiad/fsgc
 theme:
   name: material
   palette:
