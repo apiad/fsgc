@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Behavioral abandonment heuristics (NEW)
+- **`behaviors.yaml` catalog** ships four v1 rules that catch what signatures can't: Stale Code Project (180-day `.git/HEAD` mtime), Old Download (90-day file mtime under `**/Downloads/*`), Forgotten Archive (90-day file mtime, archive/installer extensions anywhere), Old Large ML Weights (180-day file mtime, weight extensions, ≥500 MB).
+- **REVIEW section in the proposal.** Behavioral matches appear under a clearly-labelled `🔍 Review` header below the structural `🗑  Garbage` groups. Never auto-checked, distinct color, and a typed-`yes` gate fires before any REVIEW item is swept.
+- **JSONL journal gains `review: true`.** Sweep entries flagged so `jq 'select(.review)' ~/.local/share/fsgc/sweep-log.jsonl` returns exactly the behavioral deletions.
+- **Trail cache integration.** `stale_dir` matches (e.g. Stale Code Project) persist alongside the trail and restore on cache hit — once a stale repo is flagged it stays flagged across subsequent warm scans. `stale_file` matches inside cached subtrees are a documented limitation; `fsgc scan --no-cache` is the escape hatch.
+- **Gitlink tolerance.** `.git` as a regular file (worktrees, submodules) no longer aborts the subtree walk — the rule simply skips.
+- **Detection cost.** One extra `os.stat` per candidate directory for the git-head signal; zero extra syscalls on file rules (reuses the `stat` already done by `_get_entries`).
+
+### Verification (Behavioral heuristics)
+- New `tests/test_behavior.py` (9 tests) covers rule loading + validation + shipped catalog.
+- New `tests/test_scanner_behavioral.py` (8 tests) covers stale_dir + stale_file detection + cache roundtrip + gitlink tolerance.
+- New `tests/test_review_flow.py` (4 tests) covers prompt gating + proposal rendering.
+- Real-world acceptance on `~/` (cold cache, 30 s budget, VPS host with sparse user data): elapsed 33.9 s, structural=3 groups, review=0 groups, zero exceptions.
+
 ### Added
 - **Sweeper module (`fsgc.sweeper`):** Extracted the deletion path into a dedicated `Sweeper` class with structured `SweepResult` / `DeletionRecord` records, replacing the inline loop in `__main__.sweep()`. The CLI now formats results; the sweeper decides what to delete.
 - **Unsafe-root guard:** Sweeper refuses to delete the filesystem root, the user's home directory, and a built-in list of system paths (`/usr`, `/etc`, `/var`, `/boot`, `/bin`, `/lib`, …) regardless of signature match.
