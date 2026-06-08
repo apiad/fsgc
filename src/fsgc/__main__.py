@@ -8,6 +8,15 @@ from typing import Annotated, Any
 import typer
 from rich.console import Console
 from rich.live import Live
+from rich.progress import (
+    BarColumn,
+    MofNCompleteColumn,
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+    TimeElapsedColumn,
+    TransferSpeedColumn,
+)
 from rich.text import Text
 from rich.tree import Tree
 
@@ -15,7 +24,7 @@ from fsgc.aggregator import group_by_signature, summarize_tree
 from fsgc.config import SignatureManager
 from fsgc.engine import HeuristicEngine
 from fsgc.scanner import DirectoryNode, Scanner
-from fsgc.sweeper import Action, SkipReason, Sweeper
+from fsgc.sweeper import DeletionRecord, SkipReason, Sweeper
 from fsgc.trail import GCTrail
 from fsgc.ui.formatter import format_size, format_speed, render_summary_tree
 from fsgc.ui.prompt import prompt_confirm_action, prompt_for_deletion
@@ -34,54 +43,80 @@ _SKIP_REASON_LABELS: dict[SkipReason, str] = {
     SkipReason.MISSING: "no longer exists",
 }
 
-_ACTION_LABELS: dict[Action, tuple[str, str]] = {
-    Action.DRY_RUN: ("DRY RUN:", "yellow"),
-    Action.TRASHED: ("Trashed:", "green"),
-    Action.DELETED: ("Deleted:", "green"),
-}
-
 
 def sweep(
     selected_groups: list[dict[str, Any]],
     dry_run: bool = True,
     trash: bool = True,
     journal_path: Path | None = None,
+    max_concurrency: int = 1,
 ) -> None:
     """
-    Perform the actual or simulated deletion of selected garbage nodes via Sweeper.
+    Perform the actual or simulated deletion of selected garbage nodes via Sweeper,
+    streaming progress through a Rich live bar.
     """
-    result = Sweeper(
+    sweeper = Sweeper(
         dry_run=dry_run,
         trash=trash,
         journal_path=journal_path,
-    ).sweep(selected_groups)
+        max_concurrency=max_concurrency,
+    )
 
-    current_group: str | None = None
-    for record in result.records:
-        if record.signature_name != current_group:
-            console.print(f"\n[bold]Collecting: {record.signature_name}[/]")
-            current_group = record.signature_name
-        if record.action in _ACTION_LABELS:
-            prefix, color = _ACTION_LABELS[record.action]
-            console.print(f"[{color}]{prefix}[/] {record.path} ({format_size(record.freed_bytes)})")
-        elif record.skip_reason is not None:
-            reason = _SKIP_REASON_LABELS[record.skip_reason]
-            console.print(f"[blue]Skipped:[/] {record.path} ({reason})")
-        elif record.error is not None:
-            console.print(f"[red]Error deleting {record.path}: {record.error}[/]")
+    total_nodes = sum(len(g["nodes"]) for g in selected_groups)
+    total_bytes = sum(n.size for g in selected_groups for n in g["nodes"])
+
+    progress = Progress(
+        SpinnerColumn(),
+        TextColumn("[bold]{task.description}[/]"),
+        BarColumn(),
+        MofNCompleteColumn(),
+        TextColumn("•"),
+        TransferSpeedColumn(),
+        TextColumn("•"),
+        TimeElapsedColumn(),
+        console=console,
+        transient=False,
+    )
 
     if dry_run:
-        verb = "Simulated"
+        verb_present = "Simulating"
     elif trash:
-        verb = "Moved to trash"
+        verb_present = "Trashing"
     else:
-        verb = "Permanently reclaimed"
-    console.print(f"\n[bold green]{verb} {format_size(result.total_freed_bytes)}![/]")
-    if result.skipped:
-        console.print(f"[blue]Skipped {len(result.skipped)} item(s) for safety.[/]")
+        verb_present = "Deleting"
+
+    with progress:
+        task_id = progress.add_task(verb_present, total=total_bytes or 1)
+
+        def on_record(record: DeletionRecord) -> None:
+            advance = record.freed_bytes if record.freed_bytes > 0 else 1
+            progress.update(task_id, advance=advance)
+
+        result = sweeper.sweep(selected_groups, progress_callback=on_record)
+
+    # Post-sweep summary: report every non-success outcome so failures are visible
+    # (the progress bar deliberately suppressed per-record chatter during the run).
     if result.errors:
-        console.print(f"[red]{len(result.errors)} deletion(s) failed.[/]")
-    if journal_path is not None and (result.deleted or result.skipped or result.errors):
+        console.print("\n[bold red]Errors:[/]")
+        for r in result.errors:
+            console.print(f"  [red]✗[/] {r.path} — {r.error}")
+    if result.skipped:
+        console.print("\n[bold blue]Skipped:[/]")
+        for r in result.skipped:
+            reason = _SKIP_REASON_LABELS[r.skip_reason] if r.skip_reason else "unknown"
+            console.print(f"  [blue]·[/] {r.path} ({reason})")
+
+    if dry_run:
+        verb_past = "Simulated"
+    elif trash:
+        verb_past = "Moved to trash"
+    else:
+        verb_past = "Permanently reclaimed"
+    console.print(
+        f"\n[bold green]{verb_past} {format_size(result.total_freed_bytes)}[/] "
+        f"across {len(result.deleted)} of {total_nodes} item(s)."
+    )
+    if journal_path is not None and result.records:
         console.print(f"[dim]Sweep journaled to {journal_path}[/]")
 
 
@@ -198,9 +233,21 @@ def _do_scan(
     if action == "abort":
         console.print("[red]Aborted.[/]")
     elif action == "dry":
-        sweep(selected_groups, dry_run=True, trash=trash, journal_path=journal_path)
+        sweep(
+            selected_groups,
+            dry_run=True,
+            trash=trash,
+            journal_path=journal_path,
+            max_concurrency=workers,
+        )
     elif action == "run":
-        sweep(selected_groups, dry_run=False, trash=trash, journal_path=journal_path)
+        sweep(
+            selected_groups,
+            dry_run=False,
+            trash=trash,
+            journal_path=journal_path,
+            max_concurrency=workers,
+        )
 
 
 @app.command()

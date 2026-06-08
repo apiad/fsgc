@@ -23,6 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Dependencies
 - Added `send2trash >= 1.8` for cross-platform recoverable deletion.
 
+### Performance
+- **Parallel sweep:** `Sweeper.max_concurrency` runs deletions on a `ThreadPoolExecutor` (default 1 for library use; CLI threads through `--workers`, default 8). `shutil.rmtree` and `send2trash` release the GIL during syscalls so a million-file `node_modules` no longer blocks the rest of the queue. Records stay reassembled in submission order; the journal serializes via a mutex so no entries are lost under concurrency.
+- **Live progress bar:** Sweeps now render a Rich `Progress` (spinner, bar, M/N items, bytes/s, elapsed) that updates per-record. The per-record chatter in the previous output was replaced by a post-sweep summary listing every error and skipped item, so failures stay visible without scrolling through the deletion log.
+
 ## [0.3.0] - 2026-03-18
 
 ### Added

@@ -26,7 +26,9 @@ import datetime
 import json
 import os
 import shutil
+import threading
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from enum import Enum
 from fnmatch import fnmatch
@@ -119,28 +121,58 @@ class Sweeper:
         *,
         dry_run: bool = True,
         trash: bool = True,
+        max_concurrency: int = 1,
         unsafe_roots: frozenset[Path] | None = None,
         journal_path: Path | None = None,
         now: Callable[[], datetime.datetime] | None = None,
     ) -> None:
         self.dry_run = dry_run
         self.trash = trash
+        self.max_concurrency = max(1, max_concurrency)
         self.journal_path = journal_path
         self._now = now or _utcnow
+        self._journal_lock = threading.Lock()
         roots = DEFAULT_UNSAFE_ROOTS if unsafe_roots is None else unsafe_roots
         self._unsafe_roots: set[Path] = {self._safe_resolve(p) for p in roots}
         self._unsafe_roots.add(self._safe_resolve(Path.home()))
 
-    def sweep(self, groups: list[dict[str, Any]]) -> SweepResult:
-        result = SweepResult()
+    def sweep(
+        self,
+        groups: list[dict[str, Any]],
+        progress_callback: Callable[[DeletionRecord], None] | None = None,
+    ) -> SweepResult:
+        """
+        Process every node in every group. Returns records in submission order
+        (group order then node order) regardless of completion order.
+
+        With max_concurrency > 1, deletions run on a thread pool — IO-bound
+        rmtree/send2trash calls release the GIL during syscalls. The
+        progress_callback fires in *completion* order so the caller's
+        progress bar updates as soon as work finishes, while result.records
+        is reassembled in submission order for stable downstream output.
+        """
+        work: list[tuple[int, DirectoryNode, Signature, str]] = []
         for group in groups:
             signature: Signature = group["signature"]
             group_name: str = group["name"]
             for node in group["nodes"]:
-                record = self._process_one(node, signature, group_name)
-                result.records.append(record)
+                work.append((len(work), node, signature, group_name))
+
+        records_by_idx: dict[int, DeletionRecord] = {}
+        if not work:
+            return SweepResult()
+
+        with ThreadPoolExecutor(max_workers=self.max_concurrency) as pool:
+            future_to_idx = {pool.submit(self._process_one, n, s, gn): i for i, n, s, gn in work}
+            for future in as_completed(future_to_idx):
+                idx = future_to_idx[future]
+                record = future.result()
+                records_by_idx[idx] = record
                 self._journal(record)
-        return result
+                if progress_callback is not None:
+                    progress_callback(record)
+
+        return SweepResult(records=[records_by_idx[i] for i in range(len(work))])
 
     def _process_one(
         self, node: DirectoryNode, signature: Signature, group_name: str
@@ -234,6 +266,7 @@ class Sweeper:
             "action": record.action.value,
             "detail": detail,
         }
-        self.journal_path.parent.mkdir(parents=True, exist_ok=True)
-        with self.journal_path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(entry) + "\n")
+        with self._journal_lock:
+            self.journal_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.journal_path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(entry) + "\n")

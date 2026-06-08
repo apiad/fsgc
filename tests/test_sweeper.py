@@ -1,6 +1,7 @@
 import datetime
 import json
 import shutil
+import threading
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -9,7 +10,7 @@ import pytest
 
 from fsgc.config import Signature
 from fsgc.scanner import DirectoryNode
-from fsgc.sweeper import Action, SkipReason, Sweeper
+from fsgc.sweeper import Action, SkipReason, Sweeper, SweepResult
 
 
 def _make_node(path: Path, size: int = 1024) -> DirectoryNode:
@@ -494,3 +495,150 @@ def test_journal_appends_across_invocations(
     entries = _read_journal(journal)
     assert len(entries) == 2
     assert {e["path"] for e in entries} == {str(a), str(b)}
+
+
+# ── Slice C: parallel sweep + progress callback ─────────────────────────────
+
+
+def _populate(target: Path) -> None:
+    target.mkdir()
+    (target / "package.json").write_text("{}")
+    (target / "blob.bin").write_bytes(b"x" * 256)
+
+
+def test_sweep_parallel_processes_every_node(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """max_concurrency > 1 must still produce one record per node."""
+    monkeypatch.setattr("fsgc.sweeper.send2trash", lambda _p: None)
+
+    nodes = []
+    for i in range(20):
+        target = tmp_path / f"node_modules_{i:02d}"
+        _populate(target)
+        nodes.append(_make_node(target, size=256 * (i + 1)))
+
+    groups = [_make_group("Node", nodes, signature=_node_sig())]
+
+    result = Sweeper(dry_run=False, max_concurrency=8, unsafe_roots=frozenset()).sweep(groups)
+
+    assert len(result.records) == 20
+    assert len(result.deleted) == 20
+    assert {r.action for r in result.records} == {Action.TRASHED}
+    assert result.total_freed_bytes == sum(256 * (i + 1) for i in range(20))
+
+
+def test_sweep_parallel_preserves_submission_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    Records come back in submission order regardless of completion order.
+
+    A spy on send2trash deliberately stalls the first item so later items
+    complete first; result.records must still match the submission ordering.
+    """
+    completed_order: list[Path] = []
+    block = threading.Event()
+    started = threading.Event()
+
+    def staggered_trash(p: str | Path) -> None:
+        path = Path(p)
+        if path.name == "node_modules_00":
+            started.set()
+            block.wait(timeout=5.0)
+        completed_order.append(path)
+
+    monkeypatch.setattr("fsgc.sweeper.send2trash", staggered_trash)
+
+    nodes = []
+    for i in range(4):
+        target = tmp_path / f"node_modules_{i:02d}"
+        _populate(target)
+        nodes.append(_make_node(target, size=100))
+    groups = [_make_group("Node", nodes, signature=_node_sig())]
+
+    sweeper = Sweeper(dry_run=False, max_concurrency=4, unsafe_roots=frozenset())
+
+    def run() -> SweepResult:
+        return sweeper.sweep(groups)
+
+    holder: list[SweepResult] = []
+    runner = threading.Thread(target=lambda: holder.append(run()))
+    runner.start()
+
+    # Wait until the blocked worker has started, then let the others finish first.
+    assert started.wait(timeout=5.0), "first worker never started"
+    # Give the other 3 a moment to complete past the blocked one.
+    import time
+
+    time.sleep(0.2)
+    block.set()
+    runner.join(timeout=5.0)
+
+    assert holder, "sweep did not return"
+    result = holder[0]
+    assert [r.path.name for r in result.records] == [f"node_modules_{i:02d}" for i in range(4)]
+    # And the completion order shows node_modules_00 finished last (the staggered one).
+    assert completed_order[-1].name == "node_modules_00"
+
+
+def test_sweep_progress_callback_fires_once_per_node(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("fsgc.sweeper.send2trash", lambda _p: None)
+
+    nodes = []
+    for i in range(7):
+        target = tmp_path / f"node_modules_{i:02d}"
+        _populate(target)
+        nodes.append(_make_node(target, size=100))
+    groups = [_make_group("Node", nodes, signature=_node_sig())]
+
+    seen: list[Path] = []
+    lock = threading.Lock()
+
+    def callback(record: Any) -> None:
+        with lock:
+            seen.append(record.path)
+
+    Sweeper(dry_run=False, max_concurrency=4, unsafe_roots=frozenset()).sweep(
+        groups, progress_callback=callback
+    )
+
+    assert len(seen) == 7
+    assert {p.name for p in seen} == {f"node_modules_{i:02d}" for i in range(7)}
+
+
+def test_sweep_parallel_journal_contains_every_outcome(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Concurrent journal writes are serialized by the sweeper's lock — no entries lost."""
+    monkeypatch.setattr("fsgc.sweeper.send2trash", lambda _p: None)
+
+    nodes = []
+    for i in range(30):
+        target = tmp_path / f"node_modules_{i:02d}"
+        _populate(target)
+        nodes.append(_make_node(target, size=100))
+    groups = [_make_group("Node", nodes, signature=_node_sig())]
+
+    journal = tmp_path / "log.jsonl"
+    Sweeper(
+        dry_run=False,
+        max_concurrency=8,
+        unsafe_roots=frozenset(),
+        journal_path=journal,
+        now=_fixed_clock(),
+    ).sweep(groups)
+
+    entries = _read_journal(journal)
+    assert len(entries) == 30
+    paths = {e["path"] for e in entries}
+    assert paths == {str(tmp_path / f"node_modules_{i:02d}") for i in range(30)}
+    assert all(e["action"] == "trashed" for e in entries)
+
+
+def test_sweep_empty_groups_returns_empty_result() -> None:
+    result = Sweeper(dry_run=False, max_concurrency=8, unsafe_roots=frozenset()).sweep([])
+    assert result.records == []
+    assert result.total_freed_bytes == 0
