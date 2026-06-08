@@ -1,5 +1,6 @@
 from typing import Any
 
+from fsgc.behavior import BehavioralMatch
 from fsgc.config import Signature
 from fsgc.scanner import DirectoryNode, ScanState
 
@@ -140,3 +141,33 @@ def group_by_signature(
     # network-dependent groups sink to the bottom — matches the audit's three axes
     # (old + stale → easy-to-rebuild → needs-network).
     return sorted(result, key=lambda x: (x["avg_score"], x["size"]), reverse=True)
+
+
+def group_behavioral_matches(matches: list[BehavioralMatch]) -> list[dict[str, Any]]:
+    """
+    Group behavioral matches by rule name into the same shape the
+    interactive prompt consumes for structural groups, plus:
+
+      - review: True            — marks the group as REVIEW (vs garbage)
+      - auto_check: False       — REVIEW items are never preselected
+      - matches: list[BehavioralMatch]  — per-item detail for the proposal
+
+    Groups are sorted by total size descending so the heaviest review items
+    surface first.
+    """
+    by_name: dict[str, list[BehavioralMatch]] = {}
+    for m in matches:
+        by_name.setdefault(m.rule_name, []).append(m)
+
+    groups: list[dict[str, Any]] = []
+    for name, items in by_name.items():
+        groups.append(
+            {
+                "name": name,
+                "size": sum(m.size_bytes for m in items),
+                "matches": items,
+                "review": True,
+                "auto_check": False,
+            }
+        )
+    return sorted(groups, key=lambda g: g["size"], reverse=True)
