@@ -1,13 +1,18 @@
 from pathlib import Path
 
-from fsgc.config import Signature
+from fsgc.config import Recovery, Signature
 from fsgc.engine import HeuristicEngine
 from fsgc.scanner import DirectoryNode
 
 
 def test_engine_rejects_signature_if_sentinel_missing():
     engine = HeuristicEngine()
-    sig = Signature(name="Build", pattern="**/build", priority=0.8, sentinels=["*.o", "Makefile"])
+    sig = Signature(
+        name="Build",
+        pattern="**/build",
+        recovery=Recovery.LOCAL,
+        sentinels=["*.o", "Makefile"],
+    )
 
     # Node matching pattern but NO evidence
     node = DirectoryNode(path=Path("/mock/myproject/build"))
@@ -18,7 +23,12 @@ def test_engine_rejects_signature_if_sentinel_missing():
 
 def test_engine_accepts_signature_if_sentinel_present():
     engine = HeuristicEngine()
-    sig = Signature(name="Build", pattern="**/build", priority=0.8, sentinels=["*.o", "Makefile"])
+    sig = Signature(
+        name="Build",
+        pattern="**/build",
+        recovery=Recovery.LOCAL,
+        sentinels=["*.o", "Makefile"],
+    )
 
     # Node matching pattern AND has .o
     node = DirectoryNode(path=Path("/mock/myproject/build"))
@@ -30,7 +40,7 @@ def test_engine_accepts_signature_if_sentinel_present():
 
 def test_engine_accepts_signature_if_no_sentinels_defined():
     engine = HeuristicEngine()
-    sig = Signature(name="Build", pattern="**/build", priority=0.8, sentinels=[])
+    sig = Signature(name="Build", pattern="**/build", recovery=Recovery.LOCAL, sentinels=[])
 
     node = DirectoryNode(path=Path("/mock/myproject/build"))
     node.file_evidence = set()

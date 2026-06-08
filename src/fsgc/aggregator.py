@@ -135,4 +135,8 @@ def group_by_signature(
         del group["scores"]
         result.append(group)
 
-    return sorted(result, key=lambda x: x["size"], reverse=True)
+    # Sort by avg_score (recovery tier × recency) descending, with total size as
+    # the tiebreaker. Old + trivially-rebuilt surfaces first; large-but-fresh and
+    # network-dependent groups sink to the bottom — matches the audit's three axes
+    # (old + stale → easy-to-rebuild → needs-network).
+    return sorted(result, key=lambda x: (x["avg_score"], x["size"]), reverse=True)

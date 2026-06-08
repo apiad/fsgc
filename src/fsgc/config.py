@@ -1,7 +1,29 @@
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 
 import yaml
+
+
+class Recovery(Enum):
+    """
+    How costly it is to restore a directory after fsgc deletes it.
+
+    Drives the score ceiling — a trivially-rebuilt cache can score 1.0;
+    a network-dependent dep tree caps at 0.4 even when ancient. Sort
+    order in the UI follows: trivial first, network last.
+    """
+
+    TRIVIAL = "trivial"  # auto-regenerates on next use, offline
+    LOCAL = "local"  # rebuilt from local sources, offline
+    NETWORK = "network"  # requires internet to refetch
+
+
+RECOVERY_CAP: dict[Recovery, float] = {
+    Recovery.TRIVIAL: 1.0,
+    Recovery.LOCAL: 0.7,
+    Recovery.NETWORK: 0.4,
+}
 
 
 @dataclass
@@ -12,9 +34,14 @@ class Signature:
 
     name: str
     pattern: str
-    priority: float
+    recovery: Recovery
     min_age_days: int = 0
     sentinels: list[str] = field(default_factory=list)
+
+    @property
+    def recovery_cap(self) -> float:
+        """Maximum score this signature can reach, regardless of recency."""
+        return RECOVERY_CAP[self.recovery]
 
 
 class SignatureManager:
@@ -49,7 +76,7 @@ class SignatureManager:
                 Signature(
                     name=s["name"],
                     pattern=s["pattern"],
-                    priority=float(s["priority"]),
+                    recovery=Recovery(s["recovery"]),
                     min_age_days=int(s.get("min_age_days", 0)),
                     sentinels=s.get("sentinels", []),
                 )

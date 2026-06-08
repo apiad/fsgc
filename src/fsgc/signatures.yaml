@@ -1,167 +1,259 @@
+# fsgc signature catalog.
+#
+# Each entry declares:
+#   name          — human-readable group name (used as the aggregator's key).
+#   pattern       — glob; `**/` prefix matches anywhere in the tree.
+#   recovery      — "trivial" (auto-regenerates, offline),
+#                   "local"   (rebuilt from local sources, offline),
+#                   "network" (requires internet to refetch).
+#                   Caps the maximum score: trivial 1.0, local 0.7, network 0.4.
+#   min_age_days  — optional; hard cutoff in days. Younger = filtered.
+#   sentinels     — optional; at least one must exist inside the directory
+#                   for the signature to apply (both at scan and sweep time).
+#
+# Sort order in the UI follows score = age_factor × recovery_cap, so
+# OLD + TRIVIAL surfaces first, YOUNG or NETWORK-bound sinks to the bottom.
+
 signatures:
-  # Python
+  # ── Python: build & test caches ─────────────────────────────────────────────
   - name: "Python Bytecode"
     pattern: "**/__pycache__"
-    priority: 1.0
-  - name: "Python Virtualenv"
-    pattern: "**/.venv"
-    priority: 0.9
-    min_age_days: 7
-    sentinels:
-      - "pyvenv.cfg"
-  - name: "Python Tests Cache"
+    recovery: trivial
+    min_age_days: 1   # avoid clobbering an active build/import
+  - name: "Pytest Cache"
     pattern: "**/.pytest_cache"
-    priority: 0.8
+    recovery: trivial
+    min_age_days: 1
   - name: "Mypy Cache"
     pattern: "**/.mypy_cache"
-    priority: 0.7
+    recovery: trivial
+    min_age_days: 1
   - name: "Ruff Cache"
     pattern: "**/.ruff_cache"
-    priority: 0.7
+    recovery: trivial
+    min_age_days: 1
   - name: "Tox Environment"
     pattern: "**/.tox"
-    priority: 0.8
-
-  # JavaScript / Node.js
-  - name: "Node Dependencies"
-    pattern: "**/node_modules"
-    priority: 0.8
+    recovery: network   # tox builds venvs which need pip install
     min_age_days: 7
-    sentinels:
-      - "package.json"
-      - "node_modules"
-  - name: "npm Cache"
-    pattern: "**/.npm"
-    priority: 0.6
-  - name: "Yarn Cache"
-    pattern: "**/.yarn/cache"
-    priority: 0.6
 
-  # Rust
-  - name: "Rust Target"
-    pattern: "**/target"
-    priority: 0.8
-    min_age_days: 2
-    sentinels:
-      - "CACHEDIR.TAG"
-      - ".rustc_info.json"
-
-  # C# / .NET
-  - name: "C# Build Artifacts (bin)"
-    pattern: "**/bin"
-    priority: 0.5
-  - name: "C# Intermediate Artifacts (obj)"
-    pattern: "**/obj"
-    priority: 0.5
-
-  # Java / Build Systems
-  - name: "Build Artifacts"
-    pattern: "**/build"
-    priority: 0.6
-    sentinels:
-      - "*.o"
-      - "*.obj"
-      - "*.a"
-      - "*.lib"
-  - name: "Distribution Artifacts"
-    pattern: "**/dist"
-    priority: 0.6
-  - name: "Output Artifacts"
-    pattern: "**/out"
-    priority: 0.6
-
-  # Machine Learning / Tools
-  - name: "Hugging Face Cache"
-    pattern: "**/.cache/huggingface"
-    priority: 0.5
-    min_age_days: 30
-  - name: "PyTorch Hub Cache"
-    pattern: "**/.cache/torch"
-    priority: 0.5
-    min_age_days: 30
+  # ── Python: package + interpreter caches (network) ──────────────────────────
+  - name: "Python Virtualenv"
+    pattern: "**/.venv"
+    recovery: network
+    min_age_days: 14
+    sentinels: ["pyvenv.cfg"]
   - name: "uv Cache"
     pattern: "**/.cache/uv"
-    priority: 0.7
+    recovery: network
     min_age_days: 7
+  - name: "uv Python Interpreters"
+    pattern: "**/.local/share/uv/python"
+    recovery: network
+    min_age_days: 30
   - name: "pip Cache"
     pattern: "**/.cache/pip"
-    priority: 0.6
+    recovery: network
     min_age_days: 30
+
+  # ── JavaScript / Node ───────────────────────────────────────────────────────
+  - name: "Node Dependencies"
+    pattern: "**/node_modules"
+    recovery: network
+    min_age_days: 14
+    sentinels: ["package.json"]
+  - name: "npm Cache"
+    pattern: "**/.npm"
+    recovery: network
+    min_age_days: 7
+  - name: "Yarn Cache"
+    pattern: "**/.yarn/cache"
+    recovery: network
+    min_age_days: 7
+  - name: "pnpm Virtual Store"
+    pattern: "**/.pnpm-store"
+    recovery: network
+    min_age_days: 14
+
+  # ── Rust ────────────────────────────────────────────────────────────────────
+  - name: "Rust Target"
+    pattern: "**/target"
+    recovery: local
+    min_age_days: 2
+    sentinels: ["CACHEDIR.TAG", ".rustc_info.json"]
   - name: "Cargo Registry"
     pattern: "**/.cargo/registry"
-    priority: 0.4
+    recovery: network
     min_age_days: 60
 
-  # OS / Metadata
-  - name: "MacOS Metadata"
-    pattern: "**/.DS_Store"
-    priority: 1.0
-  - name: "Thumbnail Cache"
-    pattern: "**/.thumbnails"
-    priority: 0.8
-
-  # Java / JVM Global Caches
+  # ── Java / JVM ──────────────────────────────────────────────────────────────
   - name: "Maven Repository Cache"
     pattern: "**/.m2/repository"
-    priority: 0.6
+    recovery: network
     min_age_days: 30
   - name: "Gradle Dependency Cache"
     pattern: "**/.gradle/caches"
-    priority: 0.6
+    recovery: network
     min_age_days: 30
   - name: "Gradle Wrapper Distributions"
     pattern: "**/.gradle/wrapper/dists"
-    priority: 0.6
+    recovery: network
     min_age_days: 30
 
-  # Go
+  # ── Go ──────────────────────────────────────────────────────────────────────
   - name: "Go Build Cache"
     pattern: "**/.cache/go-build"
-    priority: 0.7
+    recovery: local
     min_age_days: 14
   - name: "Go Module Cache"
     pattern: "**/pkg/mod"
-    priority: 0.6
+    recovery: network
     min_age_days: 30
 
-  # Additional Node.js
-  - name: "pnpm Virtual Store"
-    pattern: "**/.pnpm-store"
-    priority: 0.6
-    min_age_days: 14
-
-  # Additional ML Frameworks
+  # ── Machine Learning model caches ───────────────────────────────────────────
+  - name: "Hugging Face Cache"
+    pattern: "**/.cache/huggingface"
+    recovery: network
+    min_age_days: 30
+  - name: "PyTorch Hub Cache"
+    pattern: "**/.cache/torch"
+    recovery: network
+    min_age_days: 30
   - name: "TensorFlow Hub Cache"
     pattern: "**/tfhub_modules"
-    priority: 0.5
+    recovery: network
     min_age_days: 30
   - name: "KaggleHub Cache"
     pattern: "**/.cache/kagglehub"
-    priority: 0.5
+    recovery: network
     min_age_days: 30
 
-  # Browsers & Electron Apps
-  - name: "Chrome Cache (Linux)"
+  # ── OS metadata ─────────────────────────────────────────────────────────────
+  - name: "macOS Metadata"
+    pattern: "**/.DS_Store"
+    recovery: trivial
+  - name: "Thumbnail Cache"
+    pattern: "**/.thumbnails"
+    recovery: trivial
+    min_age_days: 7
+  - name: "System Trash (Files)"
+    pattern: "**/.local/share/Trash/files"
+    recovery: trivial   # already trash; emptying is the point
+    min_age_days: 30
+  - name: "System Trash (Info)"
+    pattern: "**/.local/share/Trash/info"
+    recovery: trivial
+    min_age_days: 30
+
+  # ── Browser caches: per-profile (Linux ~/.config/<browser>/<Profile>/…) ────
+  # Each browser keeps the bytes per-profile, not in ~/.cache. These are the
+  # rules that actually catch multi-GB of recoverable cache.
+  - name: "Chrome Profile Cache"
+    pattern: "**/.config/google-chrome/*/Cache"
+    recovery: trivial
+    min_age_days: 7
+  - name: "Chrome Profile Code Cache"
+    pattern: "**/.config/google-chrome/*/Code Cache"
+    recovery: trivial
+    min_age_days: 7
+  - name: "Chrome Profile GPU Cache"
+    pattern: "**/.config/google-chrome/*/GPUCache"
+    recovery: trivial
+    min_age_days: 7
+  - name: "Chrome Service Worker Cache"
+    pattern: "**/.config/google-chrome/*/Service Worker/CacheStorage"
+    recovery: trivial
+    min_age_days: 7
+  - name: "Chromium Profile Cache"
+    pattern: "**/.config/chromium/*/Cache"
+    recovery: trivial
+    min_age_days: 7
+  - name: "Brave Profile Cache"
+    pattern: "**/.config/BraveSoftware/Brave-Browser/*/Cache"
+    recovery: trivial
+    min_age_days: 7
+  - name: "Microsoft Edge Profile Cache"
+    pattern: "**/.config/microsoft-edge/*/Cache"
+    recovery: trivial
+    min_age_days: 7
+  - name: "Vivaldi Profile Cache"
+    pattern: "**/.config/vivaldi/*/Cache"
+    recovery: trivial
+    min_age_days: 7
+  - name: "Firefox Cache"
+    pattern: "**/.cache/mozilla/firefox/*/cache2"
+    recovery: trivial
+    min_age_days: 7
+
+  # ── Browser caches: legacy ~/.cache/<browser>/ ──────────────────────────────
+  - name: "Chrome Default Cache (Linux)"
     pattern: "**/.cache/google-chrome"
-    priority: 0.8
+    recovery: trivial
     min_age_days: 14
-  - name: "Chrome Cache (macOS)"
+  - name: "Chrome Default Cache (macOS)"
     pattern: "**/Library/Caches/Google/Chrome"
-    priority: 0.8
+    recovery: trivial
     min_age_days: 14
+
+  # ── Electron desktop apps ───────────────────────────────────────────────────
   - name: "VS Code Cache (Linux)"
     pattern: "**/.config/Code/Cache"
-    priority: 0.8
+    recovery: trivial
+    min_age_days: 14
+  - name: "VS Code Code Cache (Linux)"
+    pattern: "**/.config/Code/CachedData"
+    recovery: trivial
     min_age_days: 14
   - name: "VS Code Cache (macOS)"
     pattern: "**/Library/Application Support/Code/Cache"
-    priority: 0.8
+    recovery: trivial
+    min_age_days: 14
+  - name: "Cursor Cache (Linux)"
+    pattern: "**/.config/Cursor/Cache"
+    recovery: trivial
     min_age_days: 14
   - name: "Slack Cache (Linux)"
     pattern: "**/.config/Slack/Cache"
-    priority: 0.8
+    recovery: trivial
     min_age_days: 14
   - name: "Slack Cache (macOS)"
     pattern: "**/Library/Application Support/Slack/Cache"
-    priority: 0.8
+    recovery: trivial
     min_age_days: 14
+  - name: "Discord Cache (Linux)"
+    pattern: "**/.config/discord/Cache"
+    recovery: trivial
+    min_age_days: 14
+  - name: "Spotify Storage (Linux)"
+    pattern: "**/.config/spotify/Storage"
+    recovery: trivial
+    min_age_days: 30
+  - name: "JetBrains Caches"
+    pattern: "**/.cache/JetBrains"
+    recovery: trivial
+    min_age_days: 14
+
+  # ── Containerization / packaging app caches ─────────────────────────────────
+  - name: "Snap Cache"
+    pattern: "**/.cache/snap"
+    recovery: trivial
+    min_age_days: 14
+  - name: "Flatpak App Caches"
+    pattern: "**/.var/app/*/cache"
+    recovery: trivial
+    min_age_days: 14
+
+  # ── Generic build outputs (local-rebuild, strong sentinels required) ────────
+  # Intentionally absent: bare **/bin and **/obj — too dangerous without robust
+  # sentinels (would match ~/Workspace/bin/, .venv/bin/, ~/.local/bin/, …).
+  # Re-add per-user via ~/.config/fsgc/signatures.yaml if needed.
+  - name: "C/C++ Build Output"
+    pattern: "**/build"
+    recovery: local
+    min_age_days: 7
+    sentinels: ["*.o", "*.obj", "*.a", "*.lib", "CMakeCache.txt"]
+  - name: "Distribution Artifacts"
+    pattern: "**/dist"
+    recovery: local
+    min_age_days: 7
+    sentinels: ["*.whl", "*.tar.gz", "*.egg-info"]

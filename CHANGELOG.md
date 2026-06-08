@@ -27,6 +27,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Parallel sweep:** `Sweeper.max_concurrency` runs deletions on a `ThreadPoolExecutor` (default 1 for library use; CLI threads through `--workers`, default 8). `shutil.rmtree` and `send2trash` release the GIL during syscalls so a million-file `node_modules` no longer blocks the rest of the queue. Records stay reassembled in submission order; the journal serializes via a mutex so no entries are lost under concurrency.
 - **Live progress bar:** Sweeps now render a Rich `Progress` (spinner, bar, M/N items, bytes/s, elapsed) that updates per-record. The per-record chatter in the previous output was replaced by a post-sweep summary listing every error and skipped item, so failures stay visible without scrolling through the deletion log.
 
+### Heuristics overhaul (BREAKING — no backcompat)
+- **Recovery-tier schema:** `Signature.priority: float` removed; `Signature.recovery: Recovery` (enum: `trivial` / `local` / `network`) takes its place. The tier caps the score (1.0 / 0.7 / 0.4) and expresses how costly the directory is to restore — `trivial` regenerates automatically offline, `local` rebuilds from sources in the same tree, `network` requires re-downloading.
+- **Score formula rewritten:** `score = age_factor × RECOVERY_CAP[recovery]`. Recency was 10% of the prior formula; it's now the multiplier. The dead `p_score = 1.0 * 0.6` constant was removed entirely. Old + trivial surfaces first; young or network-bound sinks to the bottom.
+- **Group sort by score, not raw size:** `aggregator.group_by_signature` now sorts by `(avg_score, size)` descending so the user-facing proposal matches the recovery-tier ordering. Previously, large but actively-used `.venv` trees would appear above small but stale browser caches.
+- **Min-age check uses `max(atime, mtime)`:** Linux defaults to `noatime` mounts, making `atime` unreliable. mtime tracks directory-content churn (entries added/removed), which is the right "still in use" signal.
+- **Dangerous signatures removed:** Bare `**/bin` and `**/obj` (no sentinels in the YAML, despite docs claiming `.dll`/`.pdb`) are no longer shipped — they would have matched `~/Workspace/bin/`, `.venv/bin/`, `~/.local/bin/`. Re-add per-user via `~/.config/fsgc/signatures.yaml` if needed.
+- **`node_modules` sentinel fixed:** Removed the bogus literal `"node_modules"` sentinel (a directory name, not a file). `package.json` remains the sole sentinel.
+- **`__pycache__` gains `min_age_days: 1`** to avoid being swept mid-build.
+
+### Catalog expansion
+- **Per-profile browser caches (Linux):** Chrome / Chromium / Brave / Microsoft Edge / Vivaldi each get `**/.config/<browser>/<Profile>/Cache` patterns (plus Chrome's `Code Cache`, `GPUCache`, `Service Worker/CacheStorage` — where the multi-GB actually lives, vs the often-empty `~/.cache/google-chrome`).
+- **Firefox** `**/.cache/mozilla/firefox/*/cache2`.
+- **Electron desktop apps:** Discord, Spotify, JetBrains, plus Cursor and VS Code `CachedData` on top of the existing VS Code / Slack rules.
+- **uv interpreters** `**/.local/share/uv/python` (often multi-GB of downloaded CPython builds).
+- **System trash** `**/.local/share/Trash/{files,info}` — emptying the trash is now part of the sweep proposal.
+- **Snap / Flatpak per-app caches** `**/.cache/snap`, `**/.var/app/*/cache`.
+- **Generic build outputs** now require strong sentinels: `**/build` requires `*.o`/`*.a`/`*.lib`/`CMakeCache.txt`; `**/dist` requires `*.whl`/`*.tar.gz`/`*.egg-info`.
+
+### Verification
+- Total signatures: **52** (up from 32).
+- All 60 tests pass; `test_engine.py` rewritten with 9 focused tests on the new formula (recovery cap, age scaling, min-age cutoff, atime-vs-mtime, tier ordering).
+- Smoke test on `~/Workspace/repos/` surfaced **8.6 GB** recoverable across 6 groups in a single scan; with the new sort, old + trivial caches sit above large-but-fresh `.venv` trees as intended.
+
 ## [0.3.0] - 2026-03-18
 
 ### Added

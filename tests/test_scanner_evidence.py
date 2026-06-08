@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from fsgc.config import Signature
+from fsgc.config import Recovery, Signature
 from fsgc.engine import HeuristicEngine
 from fsgc.scanner import DirectoryNode, Scanner
 
@@ -48,7 +48,10 @@ async def test_scanner_filters_evidence_with_engine(tmp_path):
     (test_dir / "package.json").touch()
 
     sig = Signature(
-        name="test", pattern="**/project", priority=1.0, sentinels=["*.o", "package.json"]
+        name="test",
+        pattern="**/project",
+        recovery=Recovery.LOCAL,
+        sentinels=["*.o", "package.json"],
     )
     engine = HeuristicEngine()
     # Initialize engine with signatures

@@ -2,7 +2,7 @@ import asyncio
 import os
 import time
 
-from fsgc.config import Signature
+from fsgc.config import Recovery, Signature
 from fsgc.engine import HeuristicEngine
 from fsgc.scanner import Scanner
 
@@ -43,8 +43,18 @@ def test_deep_nested_matching(tmp_path):
     root_node = asyncio.run(run_full_scan())
 
     sigs = [
-        Signature(name="Python Virtualenv", pattern="**/.venv", priority=0.9, min_age_days=14),
-        Signature(name="uv Cache", pattern="**/.cache/uv", priority=0.7, min_age_days=7),
+        Signature(
+            name="Python Virtualenv",
+            pattern="**/.venv",
+            recovery=Recovery.NETWORK,
+            min_age_days=14,
+        ),
+        Signature(
+            name="uv Cache",
+            pattern="**/.cache/uv",
+            recovery=Recovery.NETWORK,
+            min_age_days=7,
+        ),
     ]
     engine = HeuristicEngine()
 

@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from fsgc.config import Signature
+from fsgc.config import Recovery, Signature
 from fsgc.scanner import DirectoryNode
 from fsgc.sweeper import Action, SkipReason, Sweeper, SweepResult
 
@@ -23,7 +23,7 @@ def _node_sig() -> Signature:
     return Signature(
         name="Node",
         pattern="**/node_modules",
-        priority=0.9,
+        recovery=Recovery.NETWORK,
         sentinels=["package.json"],
     )
 
@@ -35,7 +35,7 @@ def _make_group(
 ) -> dict[str, Any]:
     """Build a group dict in the shape aggregator.group_by_signature emits."""
     if signature is None:
-        signature = Signature(name=name, pattern=f"**/{name}", priority=0.9)
+        signature = Signature(name=name, pattern=f"**/{name}", recovery=Recovery.TRIVIAL)
     return {
         "name": name,
         "signature": signature,
@@ -152,7 +152,7 @@ def test_sweep_reverifies_sentinel_present(tmp_path: Path) -> None:
     sig = Signature(
         name="Python Virtualenv",
         pattern="**/.venv",
-        priority=0.9,
+        recovery=Recovery.NETWORK,
         sentinels=["pyvenv.cfg"],
     )
     groups = [_make_group("Python Virtualenv", [node], signature=sig)]
@@ -175,7 +175,7 @@ def test_sweep_skips_when_sentinel_missing_at_sweep_time(tmp_path: Path) -> None
     sig = Signature(
         name="Python Virtualenv",
         pattern="**/.venv",
-        priority=0.9,
+        recovery=Recovery.NETWORK,
         sentinels=["pyvenv.cfg"],
     )
     groups = [_make_group("Python Virtualenv", [node], signature=sig)]
@@ -195,7 +195,9 @@ def test_sweep_no_sentinels_required_proceeds(tmp_path: Path) -> None:
     (target / "module.cpython-312.pyc").write_bytes(b"\x00" * 32)
 
     node = _make_node(target, size=32)
-    sig = Signature(name="Python Bytecode", pattern="**/__pycache__", priority=1.0, sentinels=[])
+    sig = Signature(
+        name="Python Bytecode", pattern="**/__pycache__", recovery=Recovery.TRIVIAL, sentinels=[]
+    )
     groups = [_make_group("Python Bytecode", [node], signature=sig)]
 
     result = Sweeper(dry_run=False, trash=False, unsafe_roots=frozenset()).sweep(groups)
@@ -458,7 +460,9 @@ def test_journal_disabled_when_path_is_none(tmp_path: Path) -> None:
     target = tmp_path / "__pycache__"
     target.mkdir()
     (target / "x.pyc").write_bytes(b"\x00")
-    sig = Signature(name="Pycache", pattern="**/__pycache__", priority=1.0, sentinels=[])
+    sig = Signature(
+        name="Pycache", pattern="**/__pycache__", recovery=Recovery.TRIVIAL, sentinels=[]
+    )
     nodes = [_make_node(target, size=1)]
 
     Sweeper(dry_run=False, trash=False, unsafe_roots=frozenset(), journal_path=None).sweep(

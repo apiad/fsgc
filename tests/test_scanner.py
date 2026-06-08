@@ -16,14 +16,14 @@ def test_scanner_caches_signature(tmp_path: Path) -> None:
     """
     Verify that Scanner populates the signature field on DirectoryNode.
     """
-    from fsgc.config import Signature
+    from fsgc.config import Recovery, Signature
     from fsgc.engine import HeuristicEngine
 
     # Setup a directory that should match a signature
     venv_path = tmp_path / ".venv"
     venv_path.mkdir()
 
-    signatures = [Signature(name="Venv", pattern="**/.venv", priority=0.9)]
+    signatures = [Signature(name="Venv", pattern="**/.venv", recovery=Recovery.NETWORK)]
     engine = HeuristicEngine()
     scanner = Scanner(tmp_path, engine=engine, signatures=signatures)
 

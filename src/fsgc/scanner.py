@@ -237,14 +237,16 @@ class Scanner:
             return None
 
         # Tier 1: Signatures (Known Garbage Patterns)
+        # Prefer exploring children whose signature has the highest recovery cap
+        # (trivial-rebuild caches first — they're the safest, biggest scoring opportunity).
         if self.signatures:
-            best_priority = -1.0
+            best_cap = -1.0
             best_tier1 = None
             for child in available_children:
                 # Use cached signature
                 sig = child.signature
-                if sig and sig.priority > best_priority:
-                    best_priority = sig.priority
+                if sig and sig.recovery_cap > best_cap:
+                    best_cap = sig.recovery_cap
                     best_tier1 = child
 
             if best_tier1:

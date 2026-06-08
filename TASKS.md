@@ -20,7 +20,7 @@ Put done tasks into the Archive.
 
 ### Sweep safety + speed (from 2026-06-08 audit)
 
-- [ ] Drop the `auto_check = avg_score > 0.8` default in `aggregator.group_by_signature` — pre-selected checkboxes combine dangerously with the one-keystroke "Run Collection" option in `prompt_confirm_action`. Either drop auto-check or require a typed `yes` to switch from dry-run to run.
+- [ ] Drop the `auto_check = avg_score > 0.8` default in `aggregator.group_by_signature` — pre-selected checkboxes combine dangerously with the one-keystroke "Run Collection" option in `prompt_confirm_action`. With the new scoring almost nothing hits 0.8 so the practical risk is much lower, but the principle still stands.
 - [ ] Investigate `subprocess.run(["rm", "-rf", path])` fast-path for million-file trees; only worth doing now that Slice C parallel sweep landed. Measure before adopting.
 - [ ] Fix pre-existing mypy errors in `src/fsgc/scanner.py:476` (list invariance — switch `results` to `Sequence` or annotate the literal).
 
@@ -28,6 +28,7 @@ Put done tasks into the Archive.
 
 ## Archive
 
+- [x] **Heuristics overhaul:** Recovery-tier schema (`trivial` / `local` / `network`), score formula rewritten as `age_factor × RECOVERY_CAP[recovery]`, group sort by score not raw size, `max(atime, mtime)`, `**/bin` and `**/obj` dropped, `node_modules` sentinel fixed, `__pycache__` gains `min_age_days: 1`. Catalog expanded from 32 → 52 (per-profile browser caches for Chrome/Chromium/Brave/Edge/Vivaldi/Firefox, Discord/Spotify/JetBrains, uv interpreters, system trash, Snap/Flatpak). Smoke test on `~/Workspace/repos/` surfaced 8.6 GB across 6 groups. (2026-06-08)
 - [x] **Slice C — Speed:** Parallel sweep on `ThreadPoolExecutor(max_concurrency=workers)` with thread-safe JSONL journal writes; Rich `Progress` bar (bytes/s, M/N, elapsed) replaces per-record chatter, post-sweep summary lists errors + skipped. 5 new tests on parallelism + ordering + progress callback. (2026-06-08)
 - [x] **Slice B — Recoverability:** `send2trash` default + `--permanent` opt-in; JSONL sweep log at `~/.local/share/fsgc/sweep-log.jsonl` with `--no-journal` opt-out. (2026-06-08)
 - [x] **Slice A — Cleanup safety net:** Extract `Sweeper` from `__main__.sweep()` with unsafe-root + symlink + sentinel-reverify guards; 11 tests covering the previously-untested deletion path. (2026-06-08)

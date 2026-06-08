@@ -1,24 +1,36 @@
+"""
+HeuristicEngine — scores DirectoryNodes against the signature catalog.
+
+Score formula (rewritten 2026-06-08 to match Alex's three-axis intent):
+
+    age_factor = min(1.0, max(0, max(atime, mtime) − now − minimum) / threshold)
+    score      = age_factor × RECOVERY_CAP[signature.recovery]
+
+Recency is the multiplier. Recovery tier is the cap. An ancient, trivially-
+regenerated cache scores 1.0; an ancient network-fetched dep tree scores 0.4;
+a young anything scores near zero. min_age_days is a hard cutoff applied
+before scoring — younger nodes are filtered out entirely.
+
+We use max(atime, mtime) because Linux mounts default to `noatime`, so atime
+alone is unreliable. mtime tracks dir-content churn (add/remove), which is
+the right signal for "is this cache still being used."
+"""
+
 import fnmatch
 import time
 
-from fsgc.config import Signature
+from fsgc.config import RECOVERY_CAP, Signature
 from fsgc.scanner import DirectoryNode
 
 
 class HeuristicEngine:
     """
-    Scores DirectoryNodes based on pattern matching, recency, and regenerability.
+    Scores DirectoryNodes based on pattern matching, recency, and recovery cost.
     """
 
     def __init__(self, age_threshold_days: int = 90) -> None:
-        self.age_threshold = age_threshold_days * 24 * 60 * 60  # Convert to seconds
+        self.age_threshold = age_threshold_days * 24 * 60 * 60  # seconds
         self.now = time.time()
-
-        # Weights for the scoring formula
-        # Adjusted for more aggressive weighting for pattern and priority
-        self.w_pattern = 0.6
-        self.w_priority = 0.3
-        self.w_recency = 0.1
 
         # Caching matchers to avoid redundant pattern analysis
         self._matchers: list[tuple[bool, str, Signature]] | None = None
@@ -101,29 +113,23 @@ class HeuristicEngine:
 
     def calculate_score(self, node: DirectoryNode, signature: Signature | None) -> float:
         """
-        Calculate score S(n) = w1*P(n) + w2*A(n) + w3*R(n)
+        Score a matched node by age × recovery-cap. Returns 0 if too young or unmatched.
         """
         if not signature:
             return 0.0
 
-        age_seconds = self.now - node.atime
+        # Use the freshest of atime/mtime — noatime mounts make atime unreliable,
+        # mtime tracks dir-content churn which is the right "is this still used" signal.
+        last_touched = max(node.atime, node.mtime)
+        age_seconds = self.now - last_touched
         min_age_seconds = signature.min_age_days * 24 * 60 * 60
 
-        # Filter out if too young
+        # Hard cutoff: too young to even consider
         if age_seconds < min_age_seconds:
             return 0.0
 
-        p_score = 1.0  # We have a signature match
-
-        # a_score is 1.0 if age >= threshold, scaled otherwise
-        a_score = min(1.0, max(0.0, age_seconds / self.age_threshold))
-
-        r_score = signature.priority
-
-        score = (
-            (self.w_pattern * p_score) + (self.w_priority * r_score) + (self.w_recency * a_score)
-        )
-        return min(1.0, max(0.0, score))
+        age_factor = min(1.0, max(0.0, age_seconds / self.age_threshold))
+        return age_factor * RECOVERY_CAP[signature.recovery]
 
     def apply_scoring(
         self, node: DirectoryNode, signatures: list[Signature]

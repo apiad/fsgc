@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from fsgc.config import Signature
+from fsgc.config import Recovery, Signature
 from fsgc.engine import HeuristicEngine
 from fsgc.scanner import DirectoryNode, Scanner
 from fsgc.trail import TopSubdirectory
@@ -58,8 +58,9 @@ def test_mcts_selection_uses_cached_signature():
     root.add_child("2", child2)
 
     # Set cached signatures
-    child1.signature = Signature(name="Low", pattern="**/1", priority=0.1)
-    child2.signature = Signature(name="High", pattern="**/2", priority=0.9)
+    # MCTS tier-1 now prefers signatures with the highest recovery cap (TRIVIAL > NETWORK)
+    child1.signature = Signature(name="Low", pattern="**/1", recovery=Recovery.NETWORK)
+    child2.signature = Signature(name="High", pattern="**/2", recovery=Recovery.TRIVIAL)
     scanner.signatures = [child1.signature, child2.signature]
 
     # Both have visits to bypass unvisited prioritization
@@ -73,8 +74,8 @@ def test_mcts_selection_uses_cached_signature():
 def test_mcts_selection_tier1_signatures():
     # Setup scanner with signatures
     sigs = [
-        Signature(name="High", pattern="**/high/", priority=0.9),
-        Signature(name="Low", pattern="**/low/", priority=0.1),
+        Signature(name="High", pattern="**/high/", recovery=Recovery.TRIVIAL),
+        Signature(name="Low", pattern="**/low/", recovery=Recovery.NETWORK),
     ]
     engine = HeuristicEngine()
     scanner = Scanner(Path("mock_dir"), engine=engine, signatures=sigs)
