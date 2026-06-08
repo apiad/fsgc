@@ -340,7 +340,7 @@ def scan(
                 "+ sweep still run on whatever was found. 0 means no cap."
             ),
         ),
-    ] = 10.0,
+    ] = 30.0,
     full: Annotated[
         bool,
         typer.Option(
@@ -352,7 +352,7 @@ def scan(
     """
     Scans a directory for garbage and proposes collection.
     """
-    if full and budget != 10.0:
+    if full and budget != 30.0:
         raise typer.BadParameter(
             "--full and --budget are mutually exclusive (use one or the other)."
         )

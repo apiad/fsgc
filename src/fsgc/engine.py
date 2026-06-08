@@ -37,10 +37,19 @@ class HeuristicEngine:
         self._exact_sentinels: set[str] = set()
         self._glob_sentinels: list[str] = []
 
-        # Maps a directory name to the max recovery_cap of any signature whose
-        # pattern contains that name as a literal path component. Populated
-        # lazily when get_matching_signature first runs, since signatures are
-        # passed in to that method rather than stored at init.
+        # Maps a directory name to a selection prior used by Scanner.select_node:
+        #   1.0  — the name is a TERMINAL literal of some signature pattern,
+        #          i.e. "fsgc thinks garbage IS at this name" (uv, huggingface,
+        #          google-chrome, node_modules, __pycache__, …). Recovery tier
+        #          is intentionally NOT factored in here — recovery sorts the
+        #          final score, not the MCTS exploration order. Otherwise a
+        #          1 GB NETWORK target (.cache/uv) would lose to a 10 MB TRIVIAL
+        #          one (.cache/snap) just because TRIVIAL has a higher score cap.
+        #   0.5  — the name is an INTERIOR literal — a step on the way to known
+        #          garbage (.cache, .config, .local, mozilla, firefox, …).
+        #   0.0  — the name is not in any pattern.
+        # Populated lazily when get_matching_signature first runs, since
+        # signatures are passed in to that method rather than stored at init.
         self.directory_priors: dict[str, float] = {}
 
     def _get_matchers(self, signatures: list[Signature]) -> list[tuple[bool, str, Signature]]:
@@ -75,16 +84,21 @@ class HeuristicEngine:
                 else:
                     self._exact_sentinels.add(sentinel)
 
-            # Build the directory_priors map. Every non-glob path component
-            # in the pattern (other than `**`) contributes its parent signature's
-            # recovery_cap. Repeated literals take the max across all signatures.
-            cap = sig.recovery_cap
-            for part in sig.pattern.split("/"):
-                if not part or part == "**":
-                    continue
-                if any(c in part for c in "*?["):
-                    continue
-                self.directory_priors[part] = max(self.directory_priors.get(part, 0.0), cap)
+            # Build the directory_priors map. Walk the pattern's literal path
+            # components; the LAST literal is the terminal (where the garbage
+            # lives), everything before is interior (a step toward it).
+            literals = [
+                part
+                for part in sig.pattern.split("/")
+                if part and part != "**" and not any(c in part for c in "*?[")
+            ]
+            for i, part in enumerate(literals):
+                is_terminal = i == len(literals) - 1
+                weight = 1.0 if is_terminal else 0.5
+                # Take the max across all signatures — a literal that's terminal
+                # for any signature stays at 1.0 even if it's only interior in
+                # another (e.g. `Cache` is terminal in **/.config/Code/Cache).
+                self.directory_priors[part] = max(self.directory_priors.get(part, 0.0), weight)
 
         return matchers
 

@@ -23,7 +23,8 @@ def _prime(engine: HeuristicEngine, sigs: list[Signature]) -> None:
 # ── engine.directory_priors ─────────────────────────────────────────────────
 
 
-def test_engine_builds_directory_priors_from_signatures() -> None:
+def test_engine_terminal_literals_get_full_prior() -> None:
+    """The last literal in each pattern is where garbage lives — prior 1.0."""
     engine = HeuristicEngine()
     sigs = [
         Signature(name="A", pattern="**/__pycache__", recovery=Recovery.TRIVIAL),
@@ -32,27 +33,38 @@ def test_engine_builds_directory_priors_from_signatures() -> None:
     ]
     _prime(engine, sigs)
 
-    # Every literal path component contributes to the map.
-    assert engine.directory_priors["__pycache__"] == 1.0  # TRIVIAL
-    assert engine.directory_priors["node_modules"] == 0.4  # NETWORK
-    assert engine.directory_priors[".cache"] == 0.4  # via the **/.cache/uv pattern
-    assert engine.directory_priors["uv"] == 0.4
-    # No spurious keys for ** or for unrelated names
+    # Terminals: prior = 1.0 regardless of recovery tier — the tier sorts the
+    # final score, not the MCTS exploration order. NETWORK targets aren't
+    # punished at selection time.
+    assert engine.directory_priors["__pycache__"] == 1.0
+    assert engine.directory_priors["node_modules"] == 1.0
+    assert engine.directory_priors["uv"] == 1.0
+
+    # Interior: prior = 0.5 — `.cache` is the path to `uv`, not the garbage itself.
+    assert engine.directory_priors[".cache"] == 0.5
+
+    # No spurious keys
     assert "**" not in engine.directory_priors
     assert "Documents" not in engine.directory_priors
 
 
-def test_engine_directory_priors_takes_max_cap_per_literal() -> None:
-    """A literal appearing in both NETWORK and TRIVIAL sigs maps to TRIVIAL (1.0)."""
+def test_engine_literal_is_terminal_if_terminal_in_any_pattern() -> None:
+    """If a name is terminal anywhere, it stays at 1.0 even when interior elsewhere."""
     engine = HeuristicEngine()
     sigs = [
+        # `Cache` is terminal in this pattern (1.0).
+        Signature(name="Code", pattern="**/.config/Code/Cache", recovery=Recovery.TRIVIAL),
+        # In another pattern `Cache` could appear interior; we'd still keep 1.0.
         Signature(name="UV", pattern="**/.cache/uv", recovery=Recovery.NETWORK),
-        Signature(name="Chrome", pattern="**/.cache/google-chrome", recovery=Recovery.TRIVIAL),
     ]
     _prime(engine, sigs)
 
-    # `.cache` appears in both → max(NETWORK=0.4, TRIVIAL=1.0) = 1.0
-    assert engine.directory_priors[".cache"] == 1.0
+    assert engine.directory_priors["Cache"] == 1.0
+    assert engine.directory_priors["uv"] == 1.0
+    # Interiors:
+    assert engine.directory_priors[".config"] == 0.5
+    assert engine.directory_priors["Code"] == 0.5
+    assert engine.directory_priors[".cache"] == 0.5
 
 
 def test_engine_skips_glob_components_when_building_priors() -> None:
@@ -67,8 +79,9 @@ def test_engine_skips_glob_components_when_building_priors() -> None:
     ]
     _prime(engine, sigs)
 
-    assert engine.directory_priors[".config"] == 1.0
-    assert engine.directory_priors["google-chrome"] == 1.0
+    # Literals: .config (interior), google-chrome (interior), Cache (terminal).
+    assert engine.directory_priors[".config"] == 0.5
+    assert engine.directory_priors["google-chrome"] == 0.5
     assert engine.directory_priors["Cache"] == 1.0
     assert "*" not in engine.directory_priors
     assert "**" not in engine.directory_priors
@@ -133,6 +146,6 @@ def test_cli_rejects_full_and_budget_together() -> None:
     from fsgc.__main__ import app
 
     runner = CliRunner()
-    result = runner.invoke(app, ["scan", ".", "--full", "--budget", "30"])
+    result = runner.invoke(app, ["scan", ".", "--full", "--budget", "60"])
     assert result.exit_code != 0
     assert "mutually exclusive" in (result.output + str(result.exception)).lower()

@@ -70,11 +70,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Verification (Fast scan)
 - 9 new tests in `test_scanner_priors.py` (3 engine map building, 2 scanner tier-1.5 selection, 1 CLI mutex) + 3 in `test_scanner.py` (budget fires, full mode completes, timeout doesn't persist partials). 72 tests pass total.
-- Acceptance on `~/` (cold cache, 10 s budget):
-  - Wall-clock: **10.08 s**. `timed_out: True` as expected.
-  - **Found: 0.46 GB across 9 groups.** Surfaced Firefox Cache (286 MB), Discord Cache (117 MB), Python Virtualenv (59 MB), Python Bytecode, Pytest/Ruff/Gradle caches, distribution artifacts.
-  - The signature catalog correctly steered MCTS into `.cache/` first; large reclaim targets deeper in the tree (`.cache/uv`, `.local/share/Trash`, `Workspace/repos/*/.venv`) need `--budget 30` or `--full` to reach in one pass. A second run with a warm cache touches `~12k` cached subtrees and still respects the budget.
+- Acceptance on `~/` (cold cache, **30 s budget** default):
+  - Wall-clock: **30.05 s**. `timed_out: True` as expected.
+  - **Found: 0.78 GB across 16 groups.** Surfaced Firefox Cache (286 MB), Discord Cache (117 MB), Go Module Cache (72 MB), Gradle (40 MB), Flatpak (18 MB), Go Build (16 MB), uv Cache, PyTorch Hub, Pytest/Ruff/Mypy caches, Python Bytecode, distribution artifacts.
+  - Large reclaim targets deeper in the tree (`Workspace/repos/*/.venv` at 8.6 GB, `.local/share/Trash` at 1.1 GB) need `--full` to reach — they sit behind 3–4 levels of zero-prior intermediate dirs (`Workspace`, `repos`, `<repo_name>`) which MCTS can only reach by random selection at cold cache.
 - `fsgc scan --full ~` recovers today's full-walk behavior; no behavior change in `--full` mode.
+
+### Subsequent tuning (after initial acceptance)
+- **Default budget bumped from 10 s → 30 s.** 10 s consistently missed `.cache/uv`, `.cache/huggingface` and the Trash; 30 s hits them with room to spare.
+- **Prior weighting redesigned: terminal vs. interior, not max recovery cap.**
+  Previous: `directory_priors[name] = max(recovery_cap of any sig using name as a literal)`. This deprioritized network-recovery targets at selection time — `.cache/uv` (NETWORK 0.4) lost to `.cache/snap` (TRIVIAL 1.0) even when `uv` was 30× larger. Recovery is for *scoring*, not selection.
+  New: a literal scores **1.0 if terminal** (last literal of any pattern — "garbage IS here": `uv`, `huggingface`, `node_modules`, `__pycache__`, `Cache`, `cache2`, …) or **0.5 if interior** (a step on the way: `.cache`, `.config`, `mozilla`, `firefox`). Once at `~/.cache/`, MCTS treats `uv`, `huggingface`, `JetBrains`, `google-chrome`, and `snap` as equally promising — eight workers will pick all of them. Network-recovery garbage no longer hides behind trivial siblings.
 
 ## [0.3.0] - 2026-03-18
 
