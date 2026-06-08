@@ -185,6 +185,21 @@ signatures:
     recovery: trivial
     min_age_days: 7
 
+  # ── Browser crash-recovery backups (Chromium-family) ──────────────────────
+  # Chromium-family browsers periodically snapshot the active profile to a
+  # "<browser>-backup" sibling and write timestamped "*-backup-crashrecovery-*"
+  # dirs on every crash. The non-crashrecovery backup is the big one (multi-GB
+  # per browser); the crashrecovery dirs are usually empty but accumulate fast.
+  # Scoped to `**/.config/` so we don't catch user-named `myproject-backup`.
+  - name: "Browser Profile Backup"
+    pattern: "**/.config/*-backup"
+    recovery: trivial
+    min_age_days: 14
+  - name: "Browser Crash Backup"
+    pattern: "**/*-backup-crashrecovery-*"
+    recovery: trivial
+    min_age_days: 7
+
   # ── Browser caches: legacy ~/.cache/<browser>/ ──────────────────────────────
   - name: "Chrome Default Cache (Linux)"
     pattern: "**/.cache/google-chrome"

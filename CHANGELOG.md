@@ -82,6 +82,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Previous: `directory_priors[name] = max(recovery_cap of any sig using name as a literal)`. This deprioritized network-recovery targets at selection time — `.cache/uv` (NETWORK 0.4) lost to `.cache/snap` (TRIVIAL 1.0) even when `uv` was 30× larger. Recovery is for *scoring*, not selection.
   New: a literal scores **1.0 if terminal** (last literal of any pattern — "garbage IS here": `uv`, `huggingface`, `node_modules`, `__pycache__`, `Cache`, `cache2`, …) or **0.5 if interior** (a step on the way: `.cache`, `.config`, `mozilla`, `firefox`). Once at `~/.cache/`, MCTS treats `uv`, `huggingface`, `JetBrains`, `google-chrome`, and `snap` as equally promising — eight workers will pick all of them. Network-recovery garbage no longer hides behind trivial siblings.
 
+### Catalog: Chromium-family backups
+- **Browser Profile Backup** — `**/.config/*-backup` catches `google-chrome-backup`, `chromium-backup`, `opera-backup`, `vivaldi-backup`, and any future Chromium-family backup directory. The `**/.config/` scope keeps user-named `myproject-backup` etc. safe. Trivial recovery (the browser regenerates the profile on next launch), 14-day min-age.
+- **Browser Crash Backup** — `**/*-backup-crashrecovery-*` catches the timestamped `<browser>-backup-crashrecovery-YYYYMMDD_HHMMSS` directories these browsers write on every crash. Usually empty but accumulate fast (41 in the test home). Trivial recovery, 7-day min-age.
+- Smoke test: scanning `~/.config/` with `--full` surfaced **2.21 GB across 4 browser profile backups** that previously went unnoticed (`google-chrome-backup` alone was 2.0 GB) plus 41 crash-recovery dirs.
+
 ## [0.3.0] - 2026-03-18
 
 ### Added
