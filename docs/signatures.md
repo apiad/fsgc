@@ -82,6 +82,26 @@ Caches and build outputs often have common names like `build` or `dist`. Without
 | `**/build` | `*.o`, `*.a`, `*.lib`, `CMakeCache.txt` |
 | `**/dist` | `*.whl`, `*.tar.gz`, `*.egg-info` |
 
+---
+
+## 🧭 Catalog as MCTS prior
+
+The catalog plays double duty: besides scoring matched directories, it also drives **where** the scanner looks first. At engine init, every literal path component in every pattern is collected into a `directory_priors` map, with each literal mapped to the **max recovery cap** of any signature that uses it. From the built-in catalog:
+
+| Literal | Cap | Comes from |
+| :--- | :---: | :--- |
+| `.cache` | 1.0 | `**/.cache/google-chrome`, `**/.cache/JetBrains`, … |
+| `.config` | 1.0 | `**/.config/google-chrome/*/Cache`, … |
+| `.local` | 1.0 | `**/.local/share/Trash/files` |
+| `__pycache__` | 1.0 | `**/__pycache__` |
+| `node_modules` | 0.4 | `**/node_modules` |
+
+When the MCTS scanner picks the next child to explore, **tier 1.5 (signature-derived prior)** sits between the exact-match tier and the trail-derived tier: among unexplored children, prefer the one whose `path.name` has the highest entry in the priors map. Ties broken by `estimated_size`.
+
+The practical effect: on a cold cache, `fsgc scan ~` rushes into `~/.cache/`, `~/.config/`, and `~/.local/` first — exactly the places likely to contain trivial-recovery garbage — before wandering into `~/Documents/` or `~/Music/`. Combined with the `--budget` wall-clock cap (default 10 s), most users see their biggest reclaim opportunities in the first few seconds.
+
+Adding a new signature implicitly widens the prior. No parallel "where to look" config to keep in sync.
+
 Generic `**/bin` and `**/obj` were intentionally **removed** from the built-in catalog (no robust sentinel exists; they would match `~/Workspace/bin/`, every `.venv/bin/`, `~/.local/bin/`). Re-add per-user via `~/.config/fsgc/signatures.yaml` if you need C# / .NET cleanup.
 
 ---

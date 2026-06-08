@@ -191,3 +191,109 @@ def test_scanner_cache_miss_when_directory_changes(tmp_path: Path) -> None:
     # Cache must have recognized the mismatch and re-walked.
     assert scanner2.cache_misses >= 1
     store.close()
+
+
+# ── Wall-clock budget ──────────────────────────────────────────────────────
+
+
+def test_scanner_respects_budget_seconds_and_marks_timed_out(tmp_path: Path) -> None:
+    """
+    With a very small budget and a deliberately slow `_get_entries`, the scan
+    should exit early with timed_out=True and a partial tree.
+    """
+    import time as time_mod
+
+    # Build a moderately wide tree so MCTS has work to chew on.
+    for i in range(20):
+        d = tmp_path / f"dir{i:02d}"
+        d.mkdir()
+        for j in range(5):
+            (d / f"f{j}.bin").write_bytes(b"x" * 256)
+
+    scanner = Scanner(tmp_path, budget_seconds=0.05)
+
+    real_get = scanner._get_entries
+
+    def slow_get(path: Path):  # type: ignore[no-untyped-def]
+        time_mod.sleep(0.02)  # 20 ms per directory keeps us under the budget for ≤2 dirs
+        return real_get(path)
+
+    scanner._get_entries = slow_get  # type: ignore[method-assign]
+
+    async def run() -> None:
+        async for _ in scanner.scan():
+            pass
+
+    asyncio.run(run())
+
+    assert scanner.timed_out is True, "budget should have fired"
+    # Some children must have been at least added to the tree even if not all walked
+    assert scanner.tree is not None
+    assert len(scanner.tree.children) > 0
+
+
+def test_scanner_budget_none_runs_to_completion(tmp_path: Path) -> None:
+    """budget_seconds=None means no cap — every node finishes."""
+    for i in range(10):
+        (tmp_path / f"dir{i}").mkdir()
+        (tmp_path / f"dir{i}" / "f.bin").write_bytes(b"x" * 64)
+
+    scanner = Scanner(tmp_path, budget_seconds=None)
+
+    async def run() -> None:
+        async for _ in scanner.scan():
+            pass
+
+    asyncio.run(run())
+
+    assert scanner.timed_out is False
+    assert scanner.tree is not None
+    assert scanner.tree.is_fully_explored
+
+
+def test_scanner_timeout_does_not_persist_partial_subtrees(tmp_path: Path) -> None:
+    """After a forced timeout, the trail store has entries only for fully-explored nodes."""
+    import time as time_mod
+
+    from fsgc.trail import TrailStore
+
+    for i in range(20):
+        d = tmp_path / f"dir{i:02d}"
+        d.mkdir()
+        for j in range(3):
+            (d / f"f{j}.bin").write_bytes(b"x" * 128)
+
+    store = TrailStore(db_path=tmp_path / "trails.db")
+    scanner = Scanner(tmp_path, trail_store=store, trail_threshold_mb=0, budget_seconds=0.05)
+    real_get = scanner._get_entries
+
+    def slow_get(path: Path):  # type: ignore[no-untyped-def]
+        time_mod.sleep(0.02)
+        return real_get(path)
+
+    scanner._get_entries = slow_get  # type: ignore[method-assign]
+
+    async def run() -> None:
+        async for _ in scanner.scan():
+            pass
+
+    asyncio.run(run())
+
+    assert scanner.timed_out is True
+    # Every persisted entry must correspond to a fully-explored node in this scan.
+    persisted_paths = set(store.keys())
+    fully_explored_paths = {
+        str(n.path) for n in scanner.path_to_node.values() if n.is_fully_explored
+    }
+    # No persisted path may correspond to a node we know is incomplete.
+    incomplete_paths = {
+        str(n.path) for n in scanner.path_to_node.values() if not n.is_fully_explored
+    }
+    assert persisted_paths.isdisjoint(incomplete_paths), (
+        f"incomplete subtrees were persisted: {persisted_paths & incomplete_paths}"
+    )
+    # Sanity: at most as many persisted paths as we have fully-explored nodes.
+    assert persisted_paths <= fully_explored_paths or fully_explored_paths == set(), (
+        "persisted paths should be a subset of fully-explored nodes"
+    )
+    store.close()

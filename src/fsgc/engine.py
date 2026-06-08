@@ -37,10 +37,20 @@ class HeuristicEngine:
         self._exact_sentinels: set[str] = set()
         self._glob_sentinels: list[str] = []
 
+        # Maps a directory name to the max recovery_cap of any signature whose
+        # pattern contains that name as a literal path component. Populated
+        # lazily when get_matching_signature first runs, since signatures are
+        # passed in to that method rather than stored at init.
+        self.directory_priors: dict[str, float] = {}
+
     def _get_matchers(self, signatures: list[Signature]) -> list[tuple[bool, str, Signature]]:
         """
         Analyze signatures and return a list of (is_simple, pattern, signature).
         'is_simple' means it can be matched by exact directory name.
+
+        Also populates ``self.directory_priors`` — a name → max recovery_cap
+        map used by Scanner.select_node to bias MCTS toward children whose
+        names appear as literal components of any signature pattern.
         """
         matchers = []
         for sig in signatures:
@@ -64,6 +74,17 @@ class HeuristicEngine:
                         self._glob_sentinels.append(sentinel)
                 else:
                     self._exact_sentinels.add(sentinel)
+
+            # Build the directory_priors map. Every non-glob path component
+            # in the pattern (other than `**`) contributes its parent signature's
+            # recovery_cap. Repeated literals take the max across all signatures.
+            cap = sig.recovery_cap
+            for part in sig.pattern.split("/"):
+                if not part or part == "**":
+                    continue
+                if any(c in part for c in "*?["):
+                    continue
+                self.directory_priors[part] = max(self.directory_priors.get(part, 0.0), cap)
 
         return matchers
 

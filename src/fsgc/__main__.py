@@ -132,6 +132,7 @@ def _do_scan(
     trash: bool,
     journal_path: Path | None,
     use_cache: bool,
+    budget_seconds: float | None,
 ) -> None:
     path = path.resolve()
     console.print(f"[bold blue]Scanning[/] {path}...")
@@ -140,6 +141,9 @@ def _do_scan(
     # Phase 0: Initialize Engine and Signatures
     sig_manager = SignatureManager()
     engine = HeuristicEngine(age_threshold_days=age_threshold)
+    # Prime engine.directory_priors before the scan starts so Scanner.select_node
+    # can use it on the very first selection.
+    engine.get_matching_signature(DirectoryNode(path=path), sig_manager.signatures)
     trail_store = TrailStore() if use_cache else None
 
     # Phase 1: Scan and build tree (Live Updates)
@@ -149,6 +153,7 @@ def _do_scan(
         signatures=sig_manager.signatures,
         max_concurrency=workers,
         trail_store=trail_store,
+        budget_seconds=budget_seconds,
     )
 
     async def run_scan() -> DirectoryNode | None:
@@ -203,9 +208,18 @@ def _do_scan(
                 if total > 0:
                     pct = 100.0 * scanner.cache_hits / total
                     cache_info = f" · cache: {scanner.cache_hits}/{total} hits ({pct:.0f}%)"
+            budget_info = ""
+            if scanner.timed_out:
+                incomplete = sum(
+                    1 for n in scanner.path_to_node.values() if not n.is_fully_explored
+                )
+                budget_info = (
+                    f" · [yellow]budget exhausted, {incomplete} dirs incomplete "
+                    f"(use --full for thorough)[/yellow]"
+                )
             console.print(
                 f"\n[bold green]Scanned {format_size(root_node.confirmed_size)} in {duration:.2f}s "
-                f"(avg {format_speed(avg_speed)}){cache_info}[/]"
+                f"(avg {format_speed(avg_speed)}){cache_info}[/]{budget_info}"
             )
 
         return root_node
@@ -316,10 +330,38 @@ def scan(
             ),
         ),
     ] = False,
+    budget: Annotated[
+        float,
+        typer.Option(
+            "--budget",
+            help=(
+                "Wall-clock cap on the scan phase, in seconds. "
+                "MCTS surfaces the highest-priority garbage first; the prompt "
+                "+ sweep still run on whatever was found. 0 means no cap."
+            ),
+        ),
+    ] = 10.0,
+    full: Annotated[
+        bool,
+        typer.Option(
+            "--full",
+            help="Disable the scan budget — walk every directory. Shorthand for --budget 0.",
+        ),
+    ] = False,
 ) -> None:
     """
     Scans a directory for garbage and proposes collection.
     """
+    if full and budget != 10.0:
+        raise typer.BadParameter(
+            "--full and --budget are mutually exclusive (use one or the other)."
+        )
+    budget_seconds: float | None
+    if full or budget <= 0:
+        budget_seconds = None
+    else:
+        budget_seconds = budget
+
     journal_path = None if no_journal else DEFAULT_JOURNAL_PATH
     _do_scan(
         path,
@@ -333,6 +375,7 @@ def scan(
         trash,
         journal_path,
         use_cache=not no_cache,
+        budget_seconds=budget_seconds,
     )
 
 

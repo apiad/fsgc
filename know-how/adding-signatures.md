@@ -24,6 +24,8 @@ The dataclass is `Signature` in `config.py`. Schema additions need both:
 1. A new field on the `Signature` dataclass + the parser in `SignatureManager.load()`.
 2. An update to `docs/signatures.md` so the user-facing table reflects the new field.
 
+> **Side effect for free:** every literal path component you put in a `pattern` (e.g. `.cache`, `node_modules`, `google-chrome`) is also automatically added to `engine.directory_priors`, which biases MCTS toward exploring children whose names match — see `docs/signatures.md` for details. You don't have to maintain a parallel "where to look" list; the catalog IS the list.
+
 ## Recovery tiers
 
 `recovery` is the dominant axis of the score. Pick the tier that matches *how costly it is to restore the directory after deletion*:

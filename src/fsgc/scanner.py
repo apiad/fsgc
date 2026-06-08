@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import random
+import time
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 from enum import Enum, auto
@@ -210,6 +211,7 @@ class Scanner:
         max_concurrency: int = 4,
         trail_store: TrailStore | None = None,
         trail_threshold_mb: int = 0,
+        budget_seconds: float | None = None,
     ) -> None:
         self.root = root.resolve()
         self.stay_on_mount = stay_on_mount
@@ -225,6 +227,12 @@ class Scanner:
         # Diagnostic counters — let tests/users see how much the cache saved.
         self.cache_hits: int = 0
         self.cache_misses: int = 0
+        # Wall-clock budget for the scan phase. None means no cap (`--full`).
+        # The deadline is captured in `scan()` so the timer starts when the
+        # worker pool spins up, not when the Scanner is constructed.
+        self.budget_seconds: float | None = budget_seconds
+        self._deadline: float | None = None
+        self.timed_out: bool = False
 
     def _get_dev(self, path: Path) -> int:
         try:
@@ -234,8 +242,11 @@ class Scanner:
 
     def select_node(self, node: DirectoryNode) -> DirectoryNode | None:
         """
-        Select the most promising child node using a two-tiered heuristic:
-        1. Tier 1: Preconfigured folder patterns (highest recovery cap first).
+        Select the most promising child node using a multi-tier heuristic:
+        1. Tier 1: Exact signature match (highest recovery cap first).
+        1.5 Tier 1.5: Signature-derived directory prior — children whose name
+            appears as a literal component of any signature's pattern
+            (e.g. ``.cache``, ``.config``, ``node_modules``).
         2. Tier 2: Historical trash density (score×size from the previous scan).
         Fallback: Greedy largest estimated size, prioritizing unvisited.
         """
@@ -262,6 +273,26 @@ class Scanner:
 
             if best_tier1:
                 return best_tier1
+
+        # Tier 1.5: Signature-derived directory prior — go to the children
+        # whose names appear in the catalog's literal path components first.
+        # Catches the cold-cache case where the trail tier (tier 2) is empty
+        # but we still want MCTS to rush to .cache, .config, etc.
+        if self.engine and getattr(self.engine, "directory_priors", None):
+            priors = self.engine.directory_priors
+            best_prior = 0.0
+            best_prior_child: DirectoryNode | None = None
+            for child in available_children:
+                prior = priors.get(child.path.name, 0.0)
+                if prior > best_prior or (
+                    prior == best_prior
+                    and best_prior_child is not None
+                    and child.estimated_size > best_prior_child.estimated_size
+                ):
+                    best_prior = prior
+                    best_prior_child = child
+            if best_prior_child is not None and best_prior > 0.0:
+                return best_prior_child
 
         # Tier 2: Trail-derived trash density (score × size from previous scan).
         # Where there was the most garbage last time, go again first.
@@ -332,6 +363,13 @@ class Scanner:
     async def scan(self) -> AsyncGenerator[DirectoryNode, None]:
         """
         Perform an informed MCTS scan of the filesystem and yield tree snapshots.
+
+        If ``budget_seconds`` is set, the scan stops once the deadline passes
+        (checked between MCTS iterations). The partial tree is yielded one
+        final time; ``self.timed_out`` is True. Trail persistence is gated
+        on ``node.is_fully_explored`` (existing behavior), so partial subtrees
+        never pollute the cache — next run continues where this one stopped,
+        guided by the same priors.
         """
         root_node = DirectoryNode(path=self.root)
         if self.engine:
@@ -339,6 +377,13 @@ class Scanner:
         self.tree = root_node
         self.path_to_node[self.root] = root_node
         self.visited.add(os.path.realpath(self.root))
+
+        if self.budget_seconds is not None and self.budget_seconds > 0:
+            # Monotonic so NTP slew can't extend or curtail the budget.
+            self._deadline = time.monotonic() + self.budget_seconds
+        else:
+            self._deadline = None
+        self.timed_out = False
 
         # Initial expansion of root
         await self._process_directory(root_node)
@@ -356,7 +401,13 @@ class Scanner:
                 max_iterations = 50
 
                 try:
+                    if self._deadline is not None and time.monotonic() > self._deadline:
+                        self.timed_out = True
+                        return
                     while not node.is_fully_explored and iterations < max_iterations:
+                        if self._deadline is not None and time.monotonic() > self._deadline:
+                            self.timed_out = True
+                            return
                         await self.mcts_iteration(node)
                         iterations += 1
 
@@ -385,6 +436,12 @@ class Scanner:
         try:
             while not queue_task.done():
                 done, pending = await asyncio.wait([queue_task], timeout=yield_interval)
+                # End the yield loop early on budget exhaustion so the live UI
+                # snaps to its final state without waiting for the queue to
+                # drain through the workers' graceful exits.
+                if self._deadline is not None and time.monotonic() > self._deadline:
+                    self.timed_out = True
+                    break
                 if not done:
                     yield root_node
         finally:

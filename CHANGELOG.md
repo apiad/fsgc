@@ -61,6 +61,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **New `fsgc scan --no-cache`** flag bypasses `TrailStore` for one run — use weekly to recheck dirs whose mtime never changes (in-place file edits).
 - Added `beaver-db>=1.3` dependency.
 
+### Fast scan: signature-derived MCTS priors + wall-clock budget
+- **Engine `directory_priors` map.** `HeuristicEngine` precomputes a `name → max recovery_cap` map at first signature lookup, walking every pattern's literal path components. From the current catalog: `.cache → 1.0`, `.config → 1.0`, `.local → 1.0`, `__pycache__ → 1.0`, `node_modules → 0.4`, etc. The catalog is now the single source of truth for both scoring AND exploration order — no parallel hardcoded list.
+- **Scanner tier-1.5 selection.** New tier between exact-signature-match (tier 1) and trail-derived (tier 2) in `Scanner.select_node`: among unexplored children, prefer the one whose `path.name` has the highest entry in `directory_priors`. Ties broken by `estimated_size`. On cold cache, MCTS now rushes into `.cache/.config/.local` first instead of wandering into `Documents/Music/Pictures`.
+- **Wall-clock budget (`--budget N`, default 10 s).** `Scanner.__init__` takes `budget_seconds`. Worker loops check `time.monotonic()` between MCTS iterations; on deadline, mark `timed_out = True`, cancel queued workers, yield the partial tree once. Scoring + sweep run on whatever was found. Partial subtrees skip `persist_trail` (existing condition), so the cache stays clean.
+- **`--full` flag.** Shorthand for "no budget". Mutually exclusive with explicit `--budget N` (Typer raises a clean error).
+- **Summary line shows budget status.** New trailing chunk on timeout: `· budget exhausted, N dirs incomplete (use --full for thorough)`.
+
+### Verification (Fast scan)
+- 9 new tests in `test_scanner_priors.py` (3 engine map building, 2 scanner tier-1.5 selection, 1 CLI mutex) + 3 in `test_scanner.py` (budget fires, full mode completes, timeout doesn't persist partials). 72 tests pass total.
+- Acceptance on `~/` (cold cache, 10 s budget):
+  - Wall-clock: **10.08 s**. `timed_out: True` as expected.
+  - **Found: 0.46 GB across 9 groups.** Surfaced Firefox Cache (286 MB), Discord Cache (117 MB), Python Virtualenv (59 MB), Python Bytecode, Pytest/Ruff/Gradle caches, distribution artifacts.
+  - The signature catalog correctly steered MCTS into `.cache/` first; large reclaim targets deeper in the tree (`.cache/uv`, `.local/share/Trash`, `Workspace/repos/*/.venv`) need `--budget 30` or `--full` to reach in one pass. A second run with a warm cache touches `~12k` cached subtrees and still respects the budget.
+- `fsgc scan --full ~` recovers today's full-walk behavior; no behavior change in `--full` mode.
+
 ## [0.3.0] - 2026-03-18
 
 ### Added
