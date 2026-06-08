@@ -1,9 +1,13 @@
 from pathlib import Path
 
+import pytest
+import yaml
+
 from fsgc.behavior import (
     BehavioralKind,
     BehavioralMatch,
     BehavioralRule,
+    BehavioralRuleManager,
     BehavioralSignal,
 )
 
@@ -46,3 +50,77 @@ def test_behavioral_match_carries_metadata() -> None:
     assert match.rule_name == "Stale Code Project"
     assert match.size_bytes == 1024
     assert match.age_days == 200
+
+
+def test_rule_manager_loads_minimal_yaml(tmp_path: Path) -> None:
+    config = tmp_path / "behaviors.yaml"
+    config.write_text(yaml.safe_dump({
+        "rules": [
+            {
+                "name": "Stale Code Project",
+                "kind": "stale_dir",
+                "signal": "git_head_mtime",
+                "min_age_days": 180,
+            },
+            {
+                "name": "Old Download",
+                "kind": "stale_file",
+                "signal": "file_mtime",
+                "min_age_days": 90,
+                "path_scope": "**/Downloads/*",
+            },
+        ]
+    }))
+    mgr = BehavioralRuleManager(config_path=config)
+    assert len(mgr.rules) == 2
+    assert mgr.rules[0].kind is BehavioralKind.STALE_DIR
+    assert mgr.rules[1].path_scope == "**/Downloads/*"
+
+
+def test_rule_manager_separates_dir_and_file_rules(tmp_path: Path) -> None:
+    config = tmp_path / "behaviors.yaml"
+    config.write_text(yaml.safe_dump({
+        "rules": [
+            {"name": "A", "kind": "stale_dir", "signal": "git_head_mtime", "min_age_days": 30},
+            {"name": "B", "kind": "stale_file", "signal": "file_mtime", "min_age_days": 30},
+            {"name": "C", "kind": "stale_file", "signal": "file_mtime", "min_age_days": 30},
+        ]
+    }))
+    mgr = BehavioralRuleManager(config_path=config)
+    assert len(mgr.dir_rules) == 1
+    assert len(mgr.file_rules) == 2
+    assert mgr.dir_rules[0].name == "A"
+
+
+def test_rule_manager_rejects_extensions_on_stale_dir(tmp_path: Path) -> None:
+    config = tmp_path / "behaviors.yaml"
+    config.write_text(yaml.safe_dump({
+        "rules": [{
+            "name": "X",
+            "kind": "stale_dir",
+            "signal": "git_head_mtime",
+            "min_age_days": 30,
+            "extensions": [".zip"],
+        }]
+    }))
+    with pytest.raises(ValueError, match="extensions"):
+        BehavioralRuleManager(config_path=config)
+
+
+def test_rule_manager_rejects_wrong_signal_for_kind(tmp_path: Path) -> None:
+    config = tmp_path / "behaviors.yaml"
+    config.write_text(yaml.safe_dump({
+        "rules": [{
+            "name": "X",
+            "kind": "stale_file",
+            "signal": "git_head_mtime",
+            "min_age_days": 30,
+        }]
+    }))
+    with pytest.raises(ValueError, match="signal"):
+        BehavioralRuleManager(config_path=config)
+
+
+def test_rule_manager_empty_when_config_missing(tmp_path: Path) -> None:
+    mgr = BehavioralRuleManager(config_path=tmp_path / "nope.yaml")
+    assert mgr.rules == []
