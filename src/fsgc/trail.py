@@ -1,93 +1,194 @@
+"""
+Trail store — beaver-backed cache of past-scan results.
+
+Replaces the previous on-disk ``.gctrail`` files scattered through every
+scanned directory. Every record now lives in a single ``BeaverDB`` file at
+``~/.cache/fsgc/trails.db`` (override via ``TRAIL_DB_PATH``), keyed by the
+absolute path of the directory it describes.
+
+A trail record carries enough state to skip the next walk entirely when the
+directory's structural fingerprint (mtime + entry-count) is unchanged:
+
+    * ``scanned_at`` — unix timestamp; used for TTL pruning.
+    * ``fingerprint`` — hash of ``(mtime, entry_count)``; the gate for the
+      "trust the cache, don't walk" short-circuit.
+    * ``total_size`` / ``entry_count`` / ``atime`` — restored onto the
+      DirectoryNode on cache hit so MCTS sees the same metrics it would
+      have computed.
+    * ``file_evidence`` — sentinel matches at scan time; restored so the
+      engine's sentinel verification still passes on cache hit.
+    * ``top_children`` — list of ``(name, score, size)`` for the children
+      that had the highest ``recovery_cap × size`` last time. Drives the
+      scanner's tier-2 selection ("explore where the trash was").
+"""
+
 import hashlib
 import struct
+from collections.abc import Iterator
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
 
-# Binary Schema Constants
-MAGIC = b"GCTR"
-VERSION = 2
-# Header: Magic (4s), Version (B), TS (d), Hash (Q), Size (Q), RecSize (Q), NoiseSize (Q), Count (I)
-HEADER_FORMAT = "!4sB d Q QQQ I"
-SUBDIR_FORMAT = "!Q 255s"  # Size, Filename (fixed 255 bytes)
-MAX_SUBDIRS = 10  # Top 10 Subdirectories
+from beaver import BeaverDB
+
+DEFAULT_DB_PATH: Path = Path.home() / ".cache" / "fsgc" / "trails.db"
+DEFAULT_TTL_SECONDS: int = 30 * 24 * 60 * 60  # 30 days
+
+
+def calculate_fingerprint(mtime: float, nlink: int) -> int:
+    """
+    Stable 64-bit fingerprint of a directory's structural state.
+
+    Computed from the directory's own ``st_mtime`` (changes when entries are
+    added/removed) and ``st_nlink`` (changes when subdirectories are added or
+    removed — defense in depth against mtime clock skew). Both come from a
+    single ``os.stat`` call, so checking the fingerprint costs one syscall
+    versus a full ``os.scandir`` of the directory.
+    """
+    data = struct.pack("!d Q", mtime, nlink)
+    return struct.unpack("!Q", hashlib.blake2b(data, digest_size=8).digest())[0]
 
 
 @dataclass
-class TopSubdirectory:
+class TopChild:
     name: str
+    score: float  # signature score (0..1) from last scan
     size: int
 
 
 @dataclass
-class GCTrail:
-    timestamp: float
-    structural_hash: int
+class TrailRecord:
+    scanned_at: float
+    fingerprint: int
     total_size: int
-    reconstructible_size: int
-    noise_size: int
-    top_subdirs: list[TopSubdirectory]
+    entry_count: int
+    atime: float
+    mtime: float
+    file_evidence: list[str]
+    top_children: list[TopChild]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "scanned_at": self.scanned_at,
+            "fingerprint": self.fingerprint,
+            "total_size": self.total_size,
+            "entry_count": self.entry_count,
+            "atime": self.atime,
+            "mtime": self.mtime,
+            "file_evidence": self.file_evidence,
+            "top_children": [
+                {"name": c.name, "score": c.score, "size": c.size} for c in self.top_children
+            ],
+        }
 
     @classmethod
-    def from_bytes(cls, data: bytes) -> "GCTrail":
-        header_size = struct.calcsize(HEADER_FORMAT)
-        if len(data) < header_size:
-            raise ValueError("Data too short for GCTrail header")
-
-        magic, version, ts, s_hash, size, rec_size, noise, sub_count = struct.unpack(
-            HEADER_FORMAT, data[:header_size]
-        )
-
-        if magic != MAGIC:
-            raise ValueError(f"Invalid magic: {magic}")
-        if version != VERSION:
-            raise ValueError(f"Unsupported version: {version}")
-
-        top_subdirs = []
-        sub_size = struct.calcsize(SUBDIR_FORMAT)
-        offset = header_size
-
-        for _ in range(min(sub_count, MAX_SUBDIRS)):
-            if offset + sub_size > len(data):
-                break
-            s_size, s_name_bytes = struct.unpack(SUBDIR_FORMAT, data[offset : offset + sub_size])
-            s_name = s_name_bytes.rstrip(b"\x00").decode("utf-8", errors="replace")
-            top_subdirs.append(TopSubdirectory(name=s_name, size=s_size))
-            offset += sub_size
-
+    def from_dict(cls, data: dict[str, Any]) -> "TrailRecord":
         return cls(
-            timestamp=ts,
-            structural_hash=s_hash,
-            total_size=size,
-            reconstructible_size=rec_size,
-            noise_size=noise,
-            top_subdirs=top_subdirs,
+            scanned_at=float(data["scanned_at"]),
+            fingerprint=int(data["fingerprint"]),
+            total_size=int(data["total_size"]),
+            entry_count=int(data["entry_count"]),
+            atime=float(data["atime"]),
+            mtime=float(data["mtime"]),
+            file_evidence=list(data.get("file_evidence", [])),
+            top_children=[
+                TopChild(name=c["name"], score=float(c["score"]), size=int(c["size"]))
+                for c in data.get("top_children", [])
+            ],
         )
 
-    def to_bytes(self) -> bytes:
-        sub_count = len(self.top_subdirs)
-        header = struct.pack(
-            HEADER_FORMAT,
-            MAGIC,
-            VERSION,
-            self.timestamp,
-            self.structural_hash,
-            self.total_size,
-            self.reconstructible_size,
-            self.noise_size,
-            sub_count,
-        )
 
-        sub_data = []
-        for sub in self.top_subdirs[:MAX_SUBDIRS]:
-            name_bytes = sub.name.encode("utf-8")[:255].ljust(255, b"\x00")
-            sub_data.append(struct.pack(SUBDIR_FORMAT, sub.size, name_bytes))
+class TrailStore:
+    """
+    In-memory cache backed by a beaver-db dictionary.
 
-        return header + b"".join(sub_data)
+    Beaver's sync facade marshals every call onto a single background
+    "Reactor" thread, which means concurrent ``get()`` / ``set()`` from
+    multiple scanner workers serialize through one event loop and trigger
+    SQLite lock contention. To dodge that without losing beaver as the
+    on-disk store, the trail records live entirely in memory during the
+    scan; beaver is only touched in two places:
 
-    @staticmethod
-    def calculate_structural_hash(mtime: float, inode_count: int) -> int:
-        """
-        Calculate a stable structural hash based on mtime and directory entries.
-        """
-        data = struct.pack("!d Q", mtime, inode_count)
-        h = hashlib.blake2b(data, digest_size=8).digest()
-        return struct.unpack("!Q", h)[0]
+      * ``__init__``: bulk-load every persisted record via ``items()`` in
+        one round-trip.
+      * ``close()``: bulk-write every dirtied record back the same way.
+
+    Mid-scan ``get`` / ``put`` calls operate on the in-memory dict — O(1),
+    no I/O, no contention. The 30-day TTL is applied at write time.
+    """
+
+    def __init__(
+        self,
+        db_path: Path | None = None,
+        ttl_seconds: int = DEFAULT_TTL_SECONDS,
+    ) -> None:
+        self.db_path = db_path or DEFAULT_DB_PATH
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.ttl_seconds = ttl_seconds
+        self._db = BeaverDB(str(self.db_path))
+        self._trails = self._db.dict("trails")
+        self._memory: dict[str, TrailRecord] = {}
+        self._dirty: set[str] = set()
+        self._closed = False
+        self._load()
+
+    def _load(self) -> None:
+        """One-shot bulk load of every persisted record into RAM."""
+        try:
+            for key, value in self._trails.items():
+                try:
+                    self._memory[key] = TrailRecord.from_dict(value)
+                except (KeyError, ValueError, TypeError):
+                    continue
+        except OSError:
+            # If the initial dump fails (e.g. lock contention from another
+            # process), start with an empty cache — we'll re-populate as we go.
+            pass
+
+    def get(self, path: Path) -> TrailRecord | None:
+        return self._memory.get(str(path.resolve()))
+
+    def put(self, path: Path, record: TrailRecord) -> None:
+        key = str(path.resolve())
+        self._memory[key] = record
+        self._dirty.add(key)
+
+    def clear(self) -> None:
+        """Drop every cached record from memory AND persistence."""
+        self._memory.clear()
+        self._dirty.clear()
+        for key in list(self._trails.keys()):
+            try:
+                del self._trails[key]
+            except OSError:
+                pass
+
+    def keys(self) -> Iterator[str]:
+        return iter(self._memory.keys())
+
+    def flush(self) -> None:
+        """Persist every dirty record back to beaver in one pass."""
+        if not self._dirty:
+            return
+        for key in self._dirty:
+            record = self._memory.get(key)
+            if record is None:
+                continue
+            try:
+                self._trails.set(key, record.to_dict(), ttl_seconds=self.ttl_seconds)
+            except OSError:
+                continue
+        self._dirty.clear()
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self.flush()
+        self._db.close()
+        self._closed = True
+
+    def __enter__(self) -> "TrailStore":
+        return self
+
+    def __exit__(self, *args: Any) -> None:
+        self.close()

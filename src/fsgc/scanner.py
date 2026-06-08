@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from fsgc.config import Signature
-from fsgc.trail import GCTrail, TopSubdirectory
+from fsgc.trail import TopChild, TrailRecord, TrailStore, calculate_fingerprint
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +48,7 @@ class DirectoryNode:
     atime: float = 0.0  # Most recent access time in this branch
     mtime: float = 0.0  # Most recent modification time in this branch
     state: ScanState = ScanState.NONE
-    top_subdirs: list[TopSubdirectory] = field(default_factory=list)
+    top_subdirs: list[TopChild] = field(default_factory=list)
     children: dict[str, "DirectoryNode"] = field(default_factory=dict)
     is_dir: bool = True
     # Enhanced Metadata for Incremental Scan
@@ -57,6 +57,10 @@ class DirectoryNode:
     is_processed: bool = False
     entry_count: int = 0
     completion_ratio: float = 0.0
+    # Fingerprint of this directory's own (mtime, st_nlink), captured once
+    # during _process_directory and reused by persist_trail. The trail short-
+    # circuit on the next scan compares against this same value.
+    fingerprint: int = 0
 
     # MCTS metrics
     visits: int = 0
@@ -204,6 +208,8 @@ class Scanner:
         engine: "Any" = None,
         signatures: list[Signature] | None = None,
         max_concurrency: int = 4,
+        trail_store: TrailStore | None = None,
+        trail_threshold_mb: int = 0,
     ) -> None:
         self.root = root.resolve()
         self.stay_on_mount = stay_on_mount
@@ -214,6 +220,11 @@ class Scanner:
         self.engine = engine
         self.signatures = signatures or []
         self.max_concurrency = max_concurrency
+        self.trail_store = trail_store
+        self.trail_threshold_mb = trail_threshold_mb
+        # Diagnostic counters — let tests/users see how much the cache saved.
+        self.cache_hits: int = 0
+        self.cache_misses: int = 0
 
     def _get_dev(self, path: Path) -> int:
         try:
@@ -224,8 +235,8 @@ class Scanner:
     def select_node(self, node: DirectoryNode) -> DirectoryNode | None:
         """
         Select the most promising child node using a two-tiered heuristic:
-        1. Tier 1: Preconfigured folder patterns with priorities (High-value targets).
-        2. Tier 2: Historical data from .gctrail (Historical hotspots).
+        1. Tier 1: Preconfigured folder patterns (highest recovery cap first).
+        2. Tier 2: Historical trash density (score×size from the previous scan).
         Fallback: Greedy largest estimated size, prioritizing unvisited.
         """
         # Filter out fully explored children
@@ -252,14 +263,13 @@ class Scanner:
             if best_tier1:
                 return best_tier1
 
-        # Tier 2: Trail Data (Large subdirectories from previous scans)
+        # Tier 2: Trail-derived trash density (score × size from previous scan).
+        # Where there was the most garbage last time, go again first.
         if node.top_subdirs:
-            # Create a lookup for children that match trail names
-            trail_names = {sub.name: sub.size for sub in node.top_subdirs}
-            tier2_candidates = [c for c in available_children if c.path.name in trail_names]
+            trash_density = {sub.name: max(sub.score, 0.01) * sub.size for sub in node.top_subdirs}
+            tier2_candidates = [c for c in available_children if c.path.name in trash_density]
             if tier2_candidates:
-                # Return the candidate that was historically largest
-                return max(tier2_candidates, key=lambda x: trail_names.get(x.path.name, 0))
+                return max(tier2_candidates, key=lambda x: trash_density.get(x.path.name, 0))
 
         # Fallback: Greedy largest estimated size, prioritizing unvisited
         unvisited = [c for c in available_children if c.visits == 0]
@@ -307,15 +317,16 @@ class Scanner:
             path.append(current)
 
         # 4. Backpropagation (State & Trail Persistence)
-        # Propagate visits and check for FINISHED state
+        # Propagate visits and check for FINISHED state. Persist whenever a
+        # node is fully-explored — `_process_directory` already flips that
+        # bit for leaf-only dirs, so the old "just-became-explored" guard
+        # silently dropped those persists on the floor. Idempotent: re-writing
+        # the same record is cheap and lets multi-iteration nodes keep their
+        # trails fresh as more children get rolled up.
         for node in reversed(path):
             node.visits += 1
-            old_fully_explored = node.is_fully_explored
-
             node.update_metadata()
-
-            # If the node just became fully explored, persist its trail
-            if not old_fully_explored and node.is_fully_explored:
+            if node.is_fully_explored:
                 await self.persist_trail(node)
 
     async def scan(self) -> AsyncGenerator[DirectoryNode, None]:
@@ -385,25 +396,58 @@ class Scanner:
     async def _process_directory(self, node: DirectoryNode) -> None:
         """
         Scan a single directory level and update node metadata.
+
+        When a trail_store is wired and the cached fingerprint matches
+        the current ``(mtime, entry_count)`` of the directory, the walk
+        is skipped entirely — the node is hydrated from the trail and
+        marked fully-explored. This is where the sub-second second-run
+        comes from.
         """
         try:
-            # 1. Trail Logic (Fast-path if hash matches)
-            trail_path = node.path / ".gctrail"
-            if trail_path.exists():
-                try:
-                    data = await asyncio.to_thread(trail_path.read_bytes)
-                    trail = GCTrail.from_bytes(data)
-                    node.cached_size = trail.total_size
-                    node.cached_hash = trail.structural_hash
-                    node.top_subdirs = trail.top_subdirs
-                    node.estimated_size = trail.total_size
-                    # Check for quick verification (offloaded to thread)
-                    await asyncio.to_thread(os.stat, node.path)
-                    await asyncio.to_thread(os.listdir, node.path)
-                except Exception as e:
-                    logger.debug(f"Failed to load trail at {trail_path}: {e}")
+            # 1. Single os.stat — gives us mtime + nlink for the fingerprint.
+            #    On cache hit, this is the only filesystem call we make.
+            try:
+                st = await asyncio.to_thread(os.stat, node.path)
+            except (PermissionError, FileNotFoundError):
+                return
+            current_fp = calculate_fingerprint(st.st_mtime, st.st_nlink)
+            node.fingerprint = current_fp
 
-            # 2. Directory Exploration
+            # 2. Trail short-circuit: matching fingerprint means we trust the
+            #    cache and skip walking entirely. This is the sub-second second-run
+            #    win — for an unchanged 5 GB subtree, the next scan costs one
+            #    stat call instead of tens of thousands of scandir/stat calls.
+            #
+            #    Trade-off: we don't detect new garbage created INSIDE an unchanged
+            #    parent (the parent's mtime/nlink didn't change). For caches
+            #    (where add/remove DOES update mtime) this is fine; for build
+            #    outputs modified in place, run with `fsgc scan --no-cache` to
+            #    force a full walk. The TTL also caps stale entries at 30 days.
+            if self.trail_store is not None:
+                cached = self.trail_store.get(node.path)
+                if cached is not None and cached.fingerprint == current_fp:
+                    node.files_size = 0
+                    node.size = cached.total_size
+                    node.confirmed_size = cached.total_size
+                    node.estimated_size = cached.total_size
+                    node.atime = cached.atime
+                    node.mtime = cached.mtime
+                    node.entry_count = cached.entry_count
+                    node.file_evidence = set(cached.file_evidence)
+                    node.top_subdirs = list(cached.top_children)
+                    node.is_processed = True
+                    node.is_fully_explored = True
+                    node.completion_ratio = 1.0
+                    node.state = ScanState.FINISHED
+                    self.cache_hits += 1
+                    if self.engine:
+                        node.signature = await asyncio.to_thread(
+                            self.engine.get_matching_signature, node, self.signatures
+                        )
+                    return
+                self.cache_misses += 1
+
+            # 3. No cache hit — pay for the full scandir.
             entries = await asyncio.to_thread(self._get_entries, node.path)
             node.entry_count = len(entries)
 
@@ -477,30 +521,51 @@ class Scanner:
             pass
         return results
 
-    async def persist_trail(self, node: DirectoryNode, threshold_mb: int = 100) -> None:
+    async def persist_trail(self, node: DirectoryNode, threshold_mb: int | None = None) -> None:
         """
-        Recursively save .gctrail files for directories larger than threshold_mb.
+        Write the node's trail record into the central TrailStore.
+
+        We persist every successfully-walked directory above the size
+        threshold (default 10 MB) — much more aggressive than the old
+        100 MB cutoff because the cache lives in one beaver file, not
+        scattered on disk, so it costs us nothing to record more.
         """
-        # Only persist for verified nodes that meet the size threshold
-        if node.state == ScanState.FINISHED and node.size > threshold_mb * 1024 * 1024:
-            # Calculate top 10 subdirectories
-            children = sorted(node.children.values(), key=lambda x: x.size, reverse=True)
-            node.top_subdirs = [
-                TopSubdirectory(name=child.path.name, size=child.size) for child in children[:10]
-            ]
+        if self.trail_store is None:
+            return
+        if node.state != ScanState.FINISHED:
+            return
+        effective_threshold = threshold_mb if threshold_mb is not None else self.trail_threshold_mb
+        if node.size < effective_threshold * 1024 * 1024:
+            return
 
-            trail = GCTrail(
-                timestamp=node.mtime,
-                structural_hash=GCTrail.calculate_structural_hash(node.mtime, node.entry_count),
-                total_size=node.size,
-                reconstructible_size=0,
-                noise_size=0,
-                top_subdirs=node.top_subdirs,
-            )
+        # Top children by trash density: score × size. Children that match a
+        # signature score the highest; non-garbage children fall back to a
+        # tiny epsilon so they still register relative to each other.
+        scored: list[tuple[DirectoryNode, float]] = []
+        for child in node.children.values():
+            score = 0.0
+            if self.engine and child.signature is not None:
+                score = self.engine.calculate_score(child, child.signature)
+            scored.append((child, score))
 
-            trail_path = node.path / ".gctrail"
-            try:
-                trail_path.write_bytes(trail.to_bytes())
-                logger.debug(f"Persisted trail to {trail_path}")
-            except (PermissionError, OSError) as e:
-                logger.debug(f"Failed to persist trail to {trail_path}: {e}")
+        scored.sort(key=lambda pair: max(pair[1], 0.01) * pair[0].size, reverse=True)
+        top_children = [
+            TopChild(name=c.path.name, score=score, size=c.size) for c, score in scored[:10]
+        ]
+        node.top_subdirs = top_children
+
+        # Use the fingerprint captured in _process_directory — must agree
+        # exactly with what the next scan will recompute via os.stat.
+        record = TrailRecord(
+            scanned_at=node.mtime,
+            fingerprint=node.fingerprint,
+            total_size=node.size,
+            entry_count=node.entry_count,
+            atime=node.atime,
+            mtime=node.mtime,
+            file_evidence=list(node.file_evidence),
+            top_children=top_children,
+        )
+        # TrailStore's put goes to an in-memory dict; the bulk flush to
+        # beaver happens once at close() so we never contend mid-scan.
+        self.trail_store.put(node.path, record)

@@ -50,6 +50,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - All 60 tests pass; `test_engine.py` rewritten with 9 focused tests on the new formula (recovery cap, age scaling, min-age cutoff, atime-vs-mtime, tier ordering).
 - Smoke test on `~/Workspace/repos/` surfaced **8.6 GB** recoverable across 6 groups in a single scan; with the new sort, old + trivial caches sit above large-but-fresh `.venv` trees as intended.
 
+### Trail cache rewrite (BREAKING — no migration)
+- **All `.gctrail` files are gone.** The previous implementation wrote a binary `.gctrail` per directory >100 MB, scattering hundreds of pollution files across `~`, including inside `.venv` trees that were themselves about to be deleted (self-defeating). Removed the format, the persist, and the read paths. **383 stale `.gctrail` files were deleted from the workspace at the same time.**
+- **New `TrailStore` backed by `beaver-db` (SQLite).** Single file at `~/.cache/fsgc/trails.db`, keyed by absolute path. Schema: `{scanned_at, fingerprint, total_size, entry_count, atime, mtime, file_evidence, top_children: [(name, score, size)]}`. 30-day TTL applied at write time so stale entries naturally age out.
+- **In-memory cache layer.** `BeaverDB`'s sync facade marshals every call onto a single background "Reactor" thread, causing SQLite lock contention under 8 concurrent workers. `TrailStore` now bulk-loads every record on open and bulk-flushes on close; mid-scan `get`/`put` operates on a plain Python dict (O(1), zero contention).
+- **Fingerprint short-circuit on cache hit.** `_process_directory` does one `os.stat`, computes `fingerprint = hash(mtime, st_nlink)`, looks up the trail. On match: restore size/atime/mtime/evidence/top_children from the cache, mark fully-explored, return. The 30-second second-run win: **a 18.5 GB tree dropped from 100 s → 22 s** (5× speed-up) once warm. Caveat: garbage created INSIDE an unchanged parent dir (mtime didn't bubble up) is missed until the parent's mtime ticks or the TTL expires; `--no-cache` forces a full walk.
+- **Top children recorded by trash density.** Previous format stored top subdirs by raw size. New format stores `(name, score, size)` where `score = engine.calculate_score(child, child.signature)`. Tier-2 MCTS selection now picks children by `score × size` so future scans prioritize the dirs where garbage was actually found, not just the biggest dirs.
+- **New `fsgc inspect`** queries `TrailStore` (cached path list + scores) instead of reading `.gctrail` files from disk.
+- **New `fsgc cleanup-trails`** subcommand removes any leftover legacy `.gctrail` files (`--home` to scope, `--drop-cache` to also wipe the beaver DB, `--dry-run` to preview).
+- **New `fsgc scan --no-cache`** flag bypasses `TrailStore` for one run — use weekly to recheck dirs whose mtime never changes (in-place file edits).
+- Added `beaver-db>=1.3` dependency.
+
 ## [0.3.0] - 2026-03-18
 
 ### Added

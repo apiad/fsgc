@@ -3,7 +3,7 @@ from pathlib import Path
 from fsgc.config import Recovery, Signature
 from fsgc.engine import HeuristicEngine
 from fsgc.scanner import DirectoryNode, Scanner
-from fsgc.trail import TopSubdirectory
+from fsgc.trail import TopChild
 
 
 def test_mcts_selection_prioritizes_larger_estimated_size():
@@ -36,7 +36,7 @@ def test_mcts_selection_tier1_trail():
     root.add_child("2", child2)
 
     # Trail says child2 was larger
-    root.top_subdirs = [TopSubdirectory(name="2", size=1000)]
+    root.top_subdirs = [TopChild(name="2", score=0.5, size=1000)]
 
     selected = scanner.select_node(root)
     assert selected == child2

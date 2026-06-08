@@ -79,3 +79,115 @@ def test_scanner_caches_signature(tmp_path: Path) -> None:
 
     dir1_node = root_node.children["dir1"]
     assert dir1_node.atime >= new_time - 1
+
+
+def test_scanner_cache_hit_skips_walking_unchanged_subtree(tmp_path: Path) -> None:
+    """
+    The win condition: with a TrailStore and a matched signature, the second
+    scan of an unchanged garbage subtree must NOT call os.scandir on it.
+    Cache hits on signature-matched dirs short-circuit the walk.
+    """
+    import os
+
+    from fsgc.config import Recovery, Signature
+    from fsgc.engine import HeuristicEngine
+    from fsgc.trail import TrailStore
+
+    # Build a "garbage" subtree under a name that matches the trivial-recovery
+    # signature below. The cache short-circuit only fires for signature-matched
+    # dirs (otherwise we still need to walk children to find new garbage).
+    bulky = tmp_path / "__pycache__"
+    bulky.mkdir()
+    for i in range(200):
+        (bulky / f"f{i:03d}.bin").write_bytes(b"x" * 1024)
+
+    sigs = [Signature(name="Pycache", pattern="**/__pycache__", recovery=Recovery.TRIVIAL)]
+    engine = HeuristicEngine()
+    store = TrailStore(db_path=tmp_path / "trails.db")
+
+    async def run_once() -> int:
+        # trail_threshold_mb=0 so even small test fixtures get persisted.
+        scanner = Scanner(
+            tmp_path,
+            engine=engine,
+            signatures=sigs,
+            trail_store=store,
+            trail_threshold_mb=0,
+        )
+        async for _ in scanner.scan():
+            pass
+        return scanner.cache_hits
+
+    # First scan populates the trail.
+    asyncio.run(run_once())
+
+    # Second scan: spy on os.scandir to count calls. With a warm cache and
+    # the bulky/ subtree unchanged, scandir on bulky/ must not fire.
+    real_scandir = os.scandir
+    scandir_calls: list[str] = []
+
+    def counting_scandir(path):  # type: ignore[no-untyped-def]
+        scandir_calls.append(str(path))
+        return real_scandir(path)
+
+    os.scandir = counting_scandir  # type: ignore[assignment]
+    try:
+        scanner2 = Scanner(
+            tmp_path,
+            engine=engine,
+            signatures=sigs,
+            trail_store=store,
+            trail_threshold_mb=0,
+        )
+
+        async def second_scan() -> None:
+            async for _ in scanner2.scan():
+                pass
+
+        asyncio.run(second_scan())
+    finally:
+        os.scandir = real_scandir  # type: ignore[assignment]
+
+    # tmp_path itself may be re-scanned (it's the root, not signature-matched).
+    # But __pycache__ — the matched signature dir with 200 files inside —
+    # must have been short-circuited via the cache hit.
+    bulky_walks = [c for c in scandir_calls if c == str(bulky.resolve())]
+    assert bulky_walks == [], (
+        f"Second scan walked bulky/ {len(bulky_walks)} time(s); the cache hit "
+        f"should have skipped it entirely. All scandir calls: {scandir_calls}"
+    )
+    assert scanner2.cache_hits >= 1, "expected at least one cache hit on second scan"
+    store.close()
+
+
+def test_scanner_cache_miss_when_directory_changes(tmp_path: Path) -> None:
+    """If a directory's content changes between scans, the cache must NOT short-circuit."""
+    from fsgc.trail import TrailStore
+
+    target = tmp_path / "vol"
+    target.mkdir()
+    (target / "a.bin").write_bytes(b"x" * 1024)
+
+    store = TrailStore(db_path=tmp_path / "trails.db")
+
+    async def scan_once() -> None:
+        scanner = Scanner(tmp_path, trail_store=store, trail_threshold_mb=0)
+        async for _ in scanner.scan():
+            pass
+
+    asyncio.run(scan_once())
+
+    # Change the directory's contents → mtime + nlink may shift.
+    (target / "b.bin").write_bytes(b"y" * 1024)
+
+    scanner2 = Scanner(tmp_path, trail_store=store, trail_threshold_mb=0)
+
+    async def scan_again() -> None:
+        async for _ in scanner2.scan():
+            pass
+
+    asyncio.run(scan_again())
+
+    # Cache must have recognized the mismatch and re-walked.
+    assert scanner2.cache_misses >= 1
+    store.close()

@@ -25,7 +25,7 @@ from fsgc.config import SignatureManager
 from fsgc.engine import HeuristicEngine
 from fsgc.scanner import DirectoryNode, Scanner
 from fsgc.sweeper import DeletionRecord, SkipReason, Sweeper
-from fsgc.trail import GCTrail
+from fsgc.trail import DEFAULT_DB_PATH, TrailStore
 from fsgc.ui.formatter import format_size, format_speed, render_summary_tree
 from fsgc.ui.prompt import prompt_confirm_action, prompt_for_deletion
 
@@ -131,6 +131,7 @@ def _do_scan(
     workers: int,
     trash: bool,
     journal_path: Path | None,
+    use_cache: bool,
 ) -> None:
     path = path.resolve()
     console.print(f"[bold blue]Scanning[/] {path}...")
@@ -139,10 +140,15 @@ def _do_scan(
     # Phase 0: Initialize Engine and Signatures
     sig_manager = SignatureManager()
     engine = HeuristicEngine(age_threshold_days=age_threshold)
+    trail_store = TrailStore() if use_cache else None
 
     # Phase 1: Scan and build tree (Live Updates)
     scanner = Scanner(
-        path, engine=engine, signatures=sig_manager.signatures, max_concurrency=workers
+        path,
+        engine=engine,
+        signatures=sig_manager.signatures,
+        max_concurrency=workers,
+        trail_store=trail_store,
     )
 
     async def run_scan() -> DirectoryNode | None:
@@ -191,9 +197,15 @@ def _do_scan(
             root_node.calculate_metadata()
             duration = time.time() - start_time
             avg_speed = root_node.confirmed_size / duration if duration > 0 else 0
+            cache_info = ""
+            if trail_store is not None:
+                total = scanner.cache_hits + scanner.cache_misses
+                if total > 0:
+                    pct = 100.0 * scanner.cache_hits / total
+                    cache_info = f" · cache: {scanner.cache_hits}/{total} hits ({pct:.0f}%)"
             console.print(
                 f"\n[bold green]Scanned {format_size(root_node.confirmed_size)} in {duration:.2f}s "
-                f"(avg {format_speed(avg_speed)})[/]"
+                f"(avg {format_speed(avg_speed)}){cache_info}[/]"
             )
 
         return root_node
@@ -201,8 +213,12 @@ def _do_scan(
     try:
         root_node = asyncio.run(run_scan())
     except KeyboardInterrupt:
+        if trail_store is not None:
+            trail_store.close()
         return
     if not root_node:
+        if trail_store is not None:
+            trail_store.close()
         return
 
     console.print(f"\nTotal size: [bold]{format_size(root_node.size)}[/].")
@@ -249,6 +265,9 @@ def _do_scan(
             max_concurrency=workers,
         )
 
+    if trail_store is not None:
+        trail_store.close()
+
 
 @app.command()
 def scan(
@@ -286,6 +305,17 @@ def scan(
             help=f"Disable the sweep audit log (default: append to {DEFAULT_JOURNAL_PATH}).",
         ),
     ] = False,
+    no_cache: Annotated[
+        bool,
+        typer.Option(
+            "--no-cache",
+            help=(
+                "Skip the scan-result cache for this run. Without this flag, fsgc "
+                f"reads + writes ~/.cache/fsgc/trails.db ({DEFAULT_DB_PATH}) to "
+                "skip walking unchanged subtrees on repeat scans."
+            ),
+        ),
+    ] = False,
 ) -> None:
     """
     Scans a directory for garbage and proposes collection.
@@ -302,74 +332,112 @@ def scan(
         workers,
         trash,
         journal_path,
+        use_cache=not no_cache,
     )
 
 
-def get_inspect_label(path: Path, trail: GCTrail) -> Text:
+def _inspect_label(path: str, record: Any) -> Text:
     label = Text()
-    label.append(path.name if path.name else str(path), style="bold blue")
+    label.append(Path(path).name or path, style="bold blue")
     label.append(" - ", style="dim")
-    label.append(format_size(trail.total_size), style="green")
-    dt = datetime.datetime.fromtimestamp(trail.timestamp, datetime.UTC)
-    ts_str = dt.strftime("%Y-%m-%d %H:%M")
-    label.append(f" ({ts_str})", style="dim")
+    label.append(format_size(record.total_size), style="green")
+    dt = datetime.datetime.fromtimestamp(record.scanned_at, datetime.UTC)
+    label.append(f" ({dt.strftime('%Y-%m-%d %H:%M')})", style="dim")
     return label
-
-
-def build_inspect_tree(path: Path, max_depth: int, current_depth: int = 1) -> Tree | None:
-    trail_path = path if (path.is_file() and path.suffix == ".gctrail") else path / ".gctrail"
-    if not trail_path.exists():
-        return None
-
-    try:
-        data = trail_path.read_bytes()
-        trail = GCTrail.from_bytes(data)
-    except Exception:
-        return None
-
-    node_path = path if path.is_dir() else path.parent
-    tree = Tree(get_inspect_label(node_path, trail))
-
-    if current_depth < max_depth:
-        for sub in trail.top_subdirs:
-            subdir_path = node_path / sub.name
-            if subdir_path.is_dir():
-                sub_tree = build_inspect_tree(subdir_path, max_depth, current_depth + 1)
-                if sub_tree:
-                    tree.add(sub_tree)
-                else:
-                    leaf = Text()
-                    leaf.append(sub.name, style="blue")
-                    leaf.append(" - ", style="dim")
-                    leaf.append(format_size(sub.size), style="dim green")
-                    tree.add(leaf)
-            else:
-                leaf = Text()
-                leaf.append(sub.name, style="dim blue")
-                leaf.append(" - ", style="dim")
-                leaf.append(format_size(sub.size), style="dim green")
-                tree.add(leaf)
-    return tree
 
 
 @app.command(name="inspect")
 def inspect(
-    path: Annotated[Path, typer.Argument(help="Path to the directory containing .gctrail.")] = Path(
-        "."
-    ),
+    path: Annotated[
+        Path | None,
+        typer.Argument(help="Optional path prefix to filter cached entries."),
+    ] = None,
     depth: Annotated[
-        int, typer.Option("--depth", "-d", help="Recursion depth for trail inspection.")
-    ] = 1,
+        int, typer.Option("--depth", "-d", help="Top-child rows to display per entry.")
+    ] = 5,
 ) -> None:
     """
-    Inspect the contents of .gctrail files.
+    Inspect cached scan results from ~/.cache/fsgc/trails.db.
     """
-    tree = build_inspect_tree(path, depth)
-    if tree:
-        console.print(tree)
+    store = TrailStore()
+    try:
+        keys = sorted(store.keys())
+        if path is not None:
+            prefix = str(path.resolve())
+            keys = [k for k in keys if k == prefix or k.startswith(prefix + "/")]
+        if not keys:
+            console.print(f"[yellow]No cached trails found at {store.db_path}[/]")
+            raise typer.Exit(0)
+        for key in keys:
+            record = store.get(Path(key))
+            if record is None:
+                continue
+            tree = Tree(_inspect_label(key, record))
+            for child in record.top_children[:depth]:
+                leaf = Text()
+                leaf.append(child.name, style="blue")
+                leaf.append(" - ", style="dim")
+                leaf.append(format_size(child.size), style="green")
+                leaf.append(f"  score={child.score:.2f}", style="dim yellow")
+                tree.add(leaf)
+            console.print(tree)
+        console.print(f"\n[dim]{len(keys)} cached entries at {store.db_path}[/]")
+    finally:
+        store.close()
+
+
+@app.command(name="cleanup-trails")
+def cleanup_trails(
+    home: Annotated[
+        Path | None,
+        typer.Option(
+            "--home", help="Root to search for scattered .gctrail files (default: $HOME)."
+        ),
+    ] = None,
+    drop_cache: Annotated[
+        bool,
+        typer.Option("--drop-cache", help="Also drop every entry from the beaver trail cache."),
+    ] = False,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Report what would be removed without acting.")
+    ] = False,
+) -> None:
+    """
+    Remove legacy .gctrail files scattered through the filesystem, and optionally
+    clear the centralized beaver trail cache.
+    """
+    search_root = home if home is not None else Path.home()
+    found: list[Path] = list(search_root.rglob(".gctrail"))
+
+    console.print(f"[bold]Found {len(found)} scattered .gctrail file(s) under {search_root}[/]")
+    if dry_run:
+        for p in found[:20]:
+            console.print(f"  [dim]would remove[/] {p}")
+        if len(found) > 20:
+            console.print(f"  [dim]…and {len(found) - 20} more[/]")
     else:
-        console.print(f"[red]Error:[/] No .gctrail found at {path}")
-        raise typer.Exit(1)
+        removed = 0
+        for p in found:
+            try:
+                p.unlink()
+                removed += 1
+            except OSError as e:
+                console.print(f"[red]Failed to remove {p}: {e}[/]")
+        console.print(f"[green]Removed {removed} file(s).[/]")
+
+    if drop_cache:
+        store = TrailStore()
+        try:
+            count = sum(1 for _ in store.keys())
+            if dry_run:
+                console.print(f"[dim]would drop {count} cached trail entr(ies)[/]")
+            else:
+                store.clear()
+                console.print(
+                    f"[green]Dropped {count} cached trail entr(ies) from {store.db_path}[/]"
+                )
+        finally:
+            store.close()
 
 
 def run() -> None:
