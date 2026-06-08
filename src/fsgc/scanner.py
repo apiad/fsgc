@@ -552,6 +552,8 @@ class Scanner:
                         node.files_size += stat.st_size
                         node.atime = max(node.atime, stat.st_atime)
                         node.mtime = max(node.mtime, stat.st_mtime)
+                        if self.behavioral_manager is not None:
+                            self._check_behavioral_file_rules(entry_name, entry_path, stat)
                         # Collect evidence (Only if potentially relevant to sentinels)
                         # Optimization: once we have some evidence, we don't need to collect
                         # more for this dir.
@@ -601,6 +603,28 @@ class Scanner:
                     path=node.path,
                     rule_name=rule.name,
                     size_bytes=node.size,
+                    age_days=int(age_seconds / 86400),
+                )
+            )
+
+    def _check_behavioral_file_rules(self, name: str, path: Path, stat: os.stat_result) -> None:
+        """Apply every stale_file rule to a single file entry."""
+        assert self.behavioral_manager is not None  # noqa: S101
+        for rule in self.behavioral_manager.file_rules:
+            if rule.min_size_bytes and stat.st_size < rule.min_size_bytes:
+                continue
+            if rule.extensions and not any(name.endswith(ext) for ext in rule.extensions):
+                continue
+            if rule.path_scope and not path.match(rule.path_scope):
+                continue
+            age_seconds = time.time() - stat.st_mtime
+            if age_seconds < rule.min_age_days * 86400:
+                continue
+            self.behavioral_matches.append(
+                BehavioralMatch(
+                    path=path,
+                    rule_name=rule.name,
+                    size_bytes=stat.st_size,
                     age_days=int(age_seconds / 86400),
                 )
             )

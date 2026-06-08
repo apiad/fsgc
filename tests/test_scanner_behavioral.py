@@ -108,3 +108,89 @@ def test_scanner_skips_dirs_without_git(tmp_path: Path) -> None:
     asyncio.run(run())
 
     assert scanner.behavioral_matches == []
+
+
+def test_scanner_flags_old_download_by_path_scope(tmp_path: Path) -> None:
+    downloads = tmp_path / "Downloads"
+    downloads.mkdir()
+    old_dmg = downloads / "firefox-old.dmg"
+    old_dmg.write_bytes(b"x" * 4096)
+    ancient = time.time() - (100 * 86400)
+    os.utime(old_dmg, (ancient, ancient))
+
+    mgr = _make_manager(
+        BehavioralRule(
+            name="Old Download",
+            kind=BehavioralKind.STALE_FILE,
+            signal=BehavioralSignal.FILE_MTIME,
+            min_age_days=90,
+            path_scope="**/Downloads/*",
+        )
+    )
+    scanner = Scanner(tmp_path, behavioral_manager=mgr, budget_seconds=None)
+
+    async def run() -> None:
+        async for _ in scanner.scan():
+            pass
+
+    asyncio.run(run())
+
+    matches = [m for m in scanner.behavioral_matches if m.rule_name == "Old Download"]
+    assert len(matches) == 1
+    assert matches[0].path == old_dmg
+    assert matches[0].size_bytes == 4096
+
+
+def test_scanner_respects_min_size_bytes(tmp_path: Path) -> None:
+    """A .pt file at 1 KB never matches the 500 MB rule, even if ancient."""
+    tiny = tmp_path / "tiny.pt"
+    tiny.write_bytes(b"x" * 1024)
+    ancient = time.time() - (365 * 86400)
+    os.utime(tiny, (ancient, ancient))
+
+    mgr = _make_manager(
+        BehavioralRule(
+            name="Old Large ML Weights",
+            kind=BehavioralKind.STALE_FILE,
+            signal=BehavioralSignal.FILE_MTIME,
+            min_age_days=180,
+            extensions=[".pt"],
+            min_size_bytes=524_288_000,
+        )
+    )
+    scanner = Scanner(tmp_path, behavioral_manager=mgr, budget_seconds=None)
+
+    async def run() -> None:
+        async for _ in scanner.scan():
+            pass
+
+    asyncio.run(run())
+
+    assert scanner.behavioral_matches == []
+
+
+def test_scanner_respects_extensions(tmp_path: Path) -> None:
+    """A non-archive file is never a Forgotten Archive, even if old."""
+    misc = tmp_path / "old_notes.txt"
+    misc.write_bytes(b"x")
+    ancient = time.time() - (365 * 86400)
+    os.utime(misc, (ancient, ancient))
+
+    mgr = _make_manager(
+        BehavioralRule(
+            name="Forgotten Archive",
+            kind=BehavioralKind.STALE_FILE,
+            signal=BehavioralSignal.FILE_MTIME,
+            min_age_days=90,
+            extensions=[".zip", ".dmg"],
+        )
+    )
+    scanner = Scanner(tmp_path, behavioral_manager=mgr, budget_seconds=None)
+
+    async def run() -> None:
+        async for _ in scanner.scan():
+            pass
+
+    asyncio.run(run())
+
+    assert scanner.behavioral_matches == []
