@@ -660,7 +660,7 @@ class Scanner:
         """
         Blocking call to scan a directory and return metadata for its entries.
         """
-        results = []
+        results: list[tuple[str, Path, bool, os.stat_result | None]] = []
         try:
             with os.scandir(path) as it:
                 for entry in it:

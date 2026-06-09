@@ -46,7 +46,7 @@ def calculate_fingerprint(mtime: float, nlink: int) -> int:
     versus a full ``os.scandir`` of the directory.
     """
     data = struct.pack("!d Q", mtime, nlink)
-    return struct.unpack("!Q", hashlib.blake2b(data, digest_size=8).digest())[0]
+    return int(struct.unpack("!Q", hashlib.blake2b(data, digest_size=8).digest())[0])
 
 
 @dataclass

@@ -10,6 +10,7 @@ checked, gated by typed-yes confirmation. They are NOT regenerable garbage.
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -69,7 +70,7 @@ class BehavioralRuleManager:
             self.rules.append(self._parse(entry))
 
     @staticmethod
-    def _parse(entry: dict) -> BehavioralRule:
+    def _parse(entry: dict[str, Any]) -> BehavioralRule:
         kind = BehavioralKind(entry["kind"])
         signal = BehavioralSignal(entry["signal"])
         extensions = list(entry.get("extensions", []))
