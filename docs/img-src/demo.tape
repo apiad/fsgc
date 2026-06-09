@@ -5,7 +5,6 @@ Output docs/img/demo.gif
 
 Set Theme "Catppuccin Mocha"
 Set FontSize 14
-Set FontFamily "JetBrains Mono"
 Set Width 1100
 Set Height 700
 Set Padding 24
