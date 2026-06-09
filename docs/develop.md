@@ -8,7 +8,7 @@ For contributors: layout, the build-and-test gate, and how the repo coexists wit
 
 ```text
 src/fsgc/
-├── __main__.py       Typer app — `scan` (default), `inspect`, `cleanup-trails`
+├── __main__.py       Typer app — `scan` (default) and `inspect`
 ├── scanner.py        MCTS playout, DirectoryNode, parallel walk via asyncio.to_thread
 ├── engine.py         HeuristicEngine — match, sentinel verify, age × recovery score
 ├── aggregator.py     group_by_signature + group_behavioral_matches → proposal rows

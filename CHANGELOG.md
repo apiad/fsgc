@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+- **`fsgc cleanup-trails` subcommand.** Its job — scrubbing `.gctrail` files scattered by the pre-v0.4 trail format — has been done for everyone running an up-to-date fsgc, and the only remaining hook (`--drop-cache`) is trivially replaceable with `rm ~/.cache/fsgc/trails.db`. Carrying it forward kept a misleading legacy story in every help screen.
+
 ## [0.5.0] - 2026-06-09
 
 ### Fixed

@@ -70,7 +70,7 @@ score      = age_factor × RECOVERY_CAP[signature.recovery]
 
 `TrailStore` is a single SQLite file at `~/.cache/fsgc/trails.db`, opened via `beaver-db`. Mid-scan reads and writes go to an in-memory dict (O(1), no contention); the bulk flush to disk happens once at `close()`. Each entry holds the directory's fingerprint, total size, entry count, atime/mtime, a sample of file evidence, and a `top_children` ledger of `(name, score, size)`.
 
-The 30-day TTL is applied at write time, so stale entries naturally age out. `fsgc cleanup-trails --drop-cache` drops the whole store; `fsgc inspect [path]` browses what's there.
+The 30-day TTL is applied at write time, so stale entries naturally age out. `fsgc inspect [path]` browses what's cached; deleting `~/.cache/fsgc/trails.db` drops everything (the next scan recreates the store).
 
 ## Sweeper — the deletion path
 

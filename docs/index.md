@@ -119,8 +119,9 @@ Either user file fully replaces the bundled default — no merge in v1. Use this
 ```text
 fsgc scan [PATH]            Run the scan and interactive proposal.
 fsgc inspect [PATH]         Show the cached trail entries.
-fsgc cleanup-trails         Remove any legacy `.gctrail` files left over from < v0.4.
 ```
+
+To drop the whole trail cache from scratch, remove `~/.cache/fsgc/trails.db` — the next `fsgc scan` recreates it.
 
 The most useful flags on `scan`:
 

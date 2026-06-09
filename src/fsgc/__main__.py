@@ -475,60 +475,6 @@ def inspect(
         store.close()
 
 
-@app.command(name="cleanup-trails")
-def cleanup_trails(
-    home: Annotated[
-        Path | None,
-        typer.Option(
-            "--home", help="Root to search for scattered .gctrail files (default: $HOME)."
-        ),
-    ] = None,
-    drop_cache: Annotated[
-        bool,
-        typer.Option("--drop-cache", help="Also drop every entry from the beaver trail cache."),
-    ] = False,
-    dry_run: Annotated[
-        bool, typer.Option("--dry-run", help="Report what would be removed without acting.")
-    ] = False,
-) -> None:
-    """
-    Remove legacy .gctrail files scattered through the filesystem, and optionally
-    clear the centralized beaver trail cache.
-    """
-    search_root = home if home is not None else Path.home()
-    found: list[Path] = list(search_root.rglob(".gctrail"))
-
-    console.print(f"[bold]Found {len(found)} scattered .gctrail file(s) under {search_root}[/]")
-    if dry_run:
-        for p in found[:20]:
-            console.print(f"  [dim]would remove[/] {p}")
-        if len(found) > 20:
-            console.print(f"  [dim]…and {len(found) - 20} more[/]")
-    else:
-        removed = 0
-        for p in found:
-            try:
-                p.unlink()
-                removed += 1
-            except OSError as e:
-                console.print(f"[red]Failed to remove {p}: {e}[/]")
-        console.print(f"[green]Removed {removed} file(s).[/]")
-
-    if drop_cache:
-        store = TrailStore()
-        try:
-            count = sum(1 for _ in store.keys())
-            if dry_run:
-                console.print(f"[dim]would drop {count} cached trail entr(ies)[/]")
-            else:
-                store.clear()
-                console.print(
-                    f"[green]Dropped {count} cached trail entr(ies) from {store.db_path}[/]"
-                )
-        finally:
-            store.close()
-
-
 def run() -> None:
     """
     Entry point for the CLI.
