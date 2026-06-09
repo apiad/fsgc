@@ -2,86 +2,89 @@
 
 <div align="center">
 
-[![Release](https://img.shields.io/badge/Release-v0.5.0-blue.svg?style=for-the-badge)](https://github.com/apiad/fsgc/releases)
+[![PyPI](https://img.shields.io/pypi/v/fsgc?style=for-the-badge&color=blue)](https://pypi.org/project/fsgc/)
 [![License](https://img.shields.io/github/license/apiad/fsgc?style=for-the-badge&color=success)](LICENSE)
-[![Maintenance](https://img.shields.io/badge/Maintained%3F-yes-green.svg?style=for-the-badge)](https://github.com/apiad/fsgc/graphs/commit-activity)
+[![Docs](https://img.shields.io/badge/docs-apiad.github.io%2Ffsgc-teal?style=for-the-badge)](https://apiad.github.io/fsgc/)
 
-**Clean your filesystem with precision.**
+**High-signal filesystem garbage collector.**
 
-*A Python-based CLI utility that performs high-performance filesystem scanning using MCTS-informed search to identify space-intensive directories and suggests garbage collection based on intelligent heuristics.*
+*Scans your home with an MCTS-informed stochastic search, proposes deletion of build caches, virtualenvs, dep trees, OS junk — and gives the recoverable user data (stale projects, old downloads, big forgotten ML weights) its own safety-gated lane.*
 
 </div>
 
+<p align="center">
+  <img src="docs/img/demo.gif" alt="fsgc scanning a 2.6 GB synthetic tree and proposing deletions" width="100%"/>
+</p>
+
 ---
 
-## 🚀 Getting Started
+## Install
 
-The `fsgc` tool is built with modern Python tooling (`uv`).
-
-### Installation
-
-For users (recommended):
 ```bash
-uvx fsgc
-```
-Or via pipx:
-```bash
-pipx install fsgc
+uvx fsgc                 # no-install, recommended
+pipx install fsgc        # or pin globally
 ```
 
-For developers:
+Python 3.12+, Linux + macOS.
+
+## First scan
+
 ```bash
-# Clone the repository
+fsgc scan ~              # 30-second budget, interactive proposal
+fsgc scan . --dry-run    # show what would be collected, change nothing
+fsgc scan ~ --full       # disable the budget; walk everything
+```
+
+The first run on a cold cache builds the trail; the second run on the same tree finishes in seconds.
+
+---
+
+## What you'll see
+
+The interactive proposal has **two sections**, deliberately separated:
+
+- **🗑 Garbage** — directories that match a signature (`signatures.yaml`): build caches, virtualenvs, package stores, browser caches, JetBrains caches, system trash. Scored by `recovery_tier × age`; pre-selected when `score > 0.8`.
+- **🔍 Review** — abandoned user data caught by behavioral rules (`behaviors.yaml`): stale code projects (180-day `.git/HEAD` mtime), old downloads, forgotten archives, big stale ML weights. Never preselected; gated by a typed-`yes` confirmation before any deletion runs.
+
+## Safety guards
+
+Every node passes three guards on its way to deletion:
+
+1. **Unsafe-root guard** — refuses `/`, `$HOME` itself, and `/usr`, `/etc`, `/var`, `/boot`, `/bin`, `/lib`, `/opt`, `/proc`, `/root`, `/run`, `/sbin`, `/srv`, `/sys` regardless of any signature match.
+2. **Symlink guard** — symlinks are never followed; the link stays, the target is untouched.
+3. **Sentinel re-verification** — re-stat'd at sweep time; if the sentinel (e.g. `package.json` for `node_modules`) disappeared since the scan, the node is skipped.
+
+Deletion goes to the **system trash** by default (`send2trash`). Pass `--permanent` for `rmtree` semantics. Every action — `trashed`, `deleted`, `dry-run`, `skipped`, `errored` — appends one JSONL line to `~/.local/share/fsgc/sweep-log.jsonl` so the sweep is auditable.
+
+## Performance
+
+`fsgc scan` doesn't enumerate the tree. It runs an MCTS playout, prioritizing children whose name appears in the signature catalog, then children with high historical trash density from the previous scan. A **30-second budget** caps the scan by default; override with `--budget 60` or `--full`.
+
+After the first run, `~/.cache/fsgc/trails.db` holds a fingerprint, top children, and rolled-up size for every directory above 10 MB. On the next scan, unchanged directories match by fingerprint with one `os.stat` and skip the walk entirely — for an unchanged 5 GB subtree, one syscall instead of tens of thousands.
+
+---
+
+## Documentation
+
+Full docs at **<https://apiad.github.io/fsgc/>**:
+
+- [Overview](https://apiad.github.io/fsgc/) — the user-facing tour (with the animation above)
+- [Signature catalog](https://apiad.github.io/fsgc/signatures/) — schema, recovery tiers, sentinel verification
+- [Behavioral rules](https://apiad.github.io/fsgc/behaviors/) — REVIEW section anatomy, cache interaction, typed-yes flow
+- [Architecture](https://apiad.github.io/fsgc/design/) — MCTS playout, incremental propagation, the three-phase pipeline
+- [Development](https://apiad.github.io/fsgc/develop/) — contributing, tests, the lint+mypy gate
+
+## Development
+
+```bash
 git clone https://github.com/apiad/fsgc.git
 cd fsgc
-
-# Install dependencies and build the project
 uv sync
+make all            # format + lint (ruff + mypy strict) + test
 ```
 
-### Usage
+See [`AGENTS.md`](AGENTS.md) for orientation if you're an AI agent picking up the codebase, and [`CHANGELOG.md`](CHANGELOG.md) for the release history.
 
-By default, running `fsgc` will perform a stochastic MCTS-informed scan of the current directory:
+## License
 
-```bash
-fsgc scan .
-```
-
-#### Options:
-- `--workers` / `-w`: Number of concurrent workers (default: 8).
-- `--depth` / `-d`: Maximum display depth (default: 2).
-- `--min-percent` / `-p`: Minimum size percentage of parent to show child (default: 0.01).
-- `--limit` / `-l`: Maximum number of children to list individually (default: 10).
-- `--age` / `-a`: Age threshold in days for recency heuristic (default: 90).
-- `--dry-run`: Show what would be collected without deleting.
-
----
-
-## 🧠 The Core Philosophy
-
-`fsgc` is "The Architect in the Machine." It uses a **Stochastic Search** architecture to turn raw metadata into actionable deletion proposals:
-
-1.  **Scanner (The Playout):** Informed MCTS scanning using `GCTrail` history and known signatures.
-2.  **Heuristic Engine (The Mark Phase):** Scores nodes based on patterns, recency, and sentinel verification (e.g., verifying `package.json` for `node_modules`).
-3.  **Aggregator (The Sweep Phase):** Groups garbage into logical collections for interactive selection.
-
----
-
-## 🛠️ Development Lifecycle
-
-The project is managed using a highly customized Gemini CLI agent framework. For more information on the framework and available commands, refer to [GEMINI.md](GEMINI.md).
-
-### Standard Targets:
-- `make lint`: Run Ruff checks.
-- `make format`: Apply code formatting.
-- `make test`: Execute the test suite.
-- `make check`: Run Mypy static analysis.
-- `make all`: Run all checks and tests.
-
-## ⚓ The Hook System
-
-The framework uses a robust hook system (`.gemini/hooks/`) that synchronizes the agent with your project state, ensuring continuous validation and journaling.
-
-## 📄 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+MIT — see [LICENSE](LICENSE).

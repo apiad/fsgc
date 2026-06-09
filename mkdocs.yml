@@ -1,42 +1,51 @@
 site_name: fsgc
-site_description: A stochastic filesystem garbage collector using Monte Carlo Tree Search.
+site_description: High-signal filesystem garbage collector — MCTS-informed stochastic scan, two-section proposal (Garbage + Review), trash-by-default sweep with audit log.
+site_url: https://apiad.github.io/fsgc/
 repo_url: https://github.com/apiad/fsgc
+repo_name: apiad/fsgc
+
 theme:
   name: material
   palette:
-    - scheme: default
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
       primary: teal
       accent: cyan
       toggle:
         icon: material/brightness-7
         name: Switch to dark mode
-    - scheme: slate
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
       primary: teal
       accent: cyan
       toggle:
         icon: material/brightness-4
         name: Switch to light mode
   features:
-    - navigation.tabs
-    - navigation.sections
+    - navigation.instant
+    - navigation.tracking
     - navigation.top
+    - navigation.footer
     - search.suggest
     - search.highlight
     - content.code.copy
+    - content.code.annotate
+  icon:
+    repo: fontawesome/brands/github
 
 nav:
   - Overview: index.md
-  - User Guide:
-    - Installation & Usage: deploy.md
-    - GC Signatures: signatures.md
-  - Concepts:
-    - Architecture: design.md
-    - GCTrail Schema: trail.md
-  - Development:
-    - Developer Guide: develop.md
+  - Catalogs:
+      - Signatures: signatures.md
+      - Behavioral rules: behaviors.md
+  - Internals:
+      - Architecture: design.md
+      - Development: develop.md
 
 markdown_extensions:
   - admonition
+  - attr_list
+  - md_in_html
   - pymdownx.details
   - pymdownx.superfences
   - pymdownx.highlight:
@@ -49,5 +58,13 @@ markdown_extensions:
       alternate_style: true
   - pymdownx.tasklist:
       custom_checkbox: true
+  - tables
   - toc:
       permalink: true
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/apiad/fsgc
+    - icon: fontawesome/brands/python
+      link: https://pypi.org/project/fsgc/
