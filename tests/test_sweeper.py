@@ -653,20 +653,17 @@ def test_sweeper_records_review_flag_on_group(tmp_path: Path) -> None:
     A group marked with review=True flows that flag into every DeletionRecord
     and (when journal_path is set) the JSONL journal line.
     """
-    import json
-
-    from fsgc.sweeper import Sweeper
+    from fsgc.behavior import BehavioralMatch
 
     target = tmp_path / "doomed.bin"
     target.write_bytes(b"x" * 1024)
 
+    match = BehavioralMatch(path=target, rule_name="Old Download", size_bytes=1024, age_days=120)
     group = {
         "name": "Old Download",
-        "signature": None,
         "review": True,
-        "nodes": [],
-        "matches": [],
-        "behavioral_paths": [target],
+        "matches": [match],
+        "auto_check": False,
     }
     journal = tmp_path / "log.jsonl"
     sweeper = Sweeper(
@@ -680,10 +677,46 @@ def test_sweeper_records_review_flag_on_group(tmp_path: Path) -> None:
     assert not target.exists()
     assert len(result.deleted) == 1
     assert result.deleted[0].review is True
+    assert result.deleted[0].freed_bytes == 1024
 
     lines = [json.loads(line) for line in journal.read_text().splitlines() if line]
     assert lines[0]["review"] is True
     assert lines[0]["signature"] == "Old Download"
+    assert lines[0]["size_bytes"] == 1024
+
+
+def test_sweeper_uses_recorded_size_for_stale_dir_review(tmp_path: Path) -> None:
+    """
+    For stale_dir REVIEW matches, the rolled-up directory size carried by
+    BehavioralMatch.size_bytes must flow through to DeletionRecord.freed_bytes
+    — a directory's own st_size is 0 on most filesystems, so the sweeper
+    cannot recompute it from path.stat().
+    """
+    from fsgc.behavior import BehavioralMatch
+
+    stale_project = tmp_path / "old-project"
+    stale_project.mkdir()
+    (stale_project / "main.py").write_bytes(b"x" * 100_000)
+
+    match = BehavioralMatch(
+        path=stale_project,
+        rule_name="Stale Code Project",
+        size_bytes=100_000,
+        age_days=200,
+    )
+    group = {
+        "name": "Stale Code Project",
+        "review": True,
+        "matches": [match],
+        "auto_check": False,
+    }
+    sweeper = Sweeper(dry_run=False, trash=False, unsafe_roots=frozenset())
+    result = sweeper.sweep([group])
+
+    assert not stale_project.exists()
+    assert len(result.deleted) == 1
+    assert result.deleted[0].freed_bytes == 100_000
+    assert result.total_freed_bytes == 100_000
 
 
 def test_sweeper_records_review_false_for_structural(tmp_path: Path) -> None:

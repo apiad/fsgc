@@ -65,7 +65,7 @@ def sweep(
 
     def _group_item_count(g: dict[str, Any]) -> int:
         if g.get("review"):
-            return len(g.get("behavioral_paths", []))
+            return len(g.get("matches", []))
         return len(g.get("nodes", []))
 
     def _group_byte_total(g: dict[str, Any]) -> int:
@@ -302,9 +302,6 @@ def _do_scan(
     if action == "abort":
         console.print("[red]Aborted.[/]")
     elif action == "dry":
-        for g in selected_groups:
-            if g.get("review"):
-                g["behavioral_paths"] = [m.path for m in g.get("matches", [])]
         sweep(
             selected_groups,
             dry_run=True,
@@ -313,14 +310,10 @@ def _do_scan(
             max_concurrency=workers,
         )
     elif action == "run":
-        # Sweeper consumes a flat list of paths for review groups.
-        for g in selected_groups:
-            if g.get("review"):
-                g["behavioral_paths"] = [m.path for m in g.get("matches", [])]
         review_selected = [g for g in selected_groups if g.get("review")]
         if review_selected:
             if not prompt_confirm_review(
-                num_items=sum(len(g.get("behavioral_paths", [])) for g in review_selected)
+                num_items=sum(len(g.get("matches", [])) for g in review_selected)
             ):
                 console.print("[yellow]REVIEW items not confirmed — excluding from sweep.[/]")
                 selected_groups = [g for g in selected_groups if not g.get("review")]

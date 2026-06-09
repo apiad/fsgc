@@ -37,6 +37,7 @@ from typing import Any
 
 from send2trash import send2trash
 
+from fsgc.behavior import BehavioralMatch
 from fsgc.config import Signature
 
 DEFAULT_UNSAFE_ROOTS: frozenset[Path] = frozenset(
@@ -156,10 +157,13 @@ class Sweeper:
             group_name: str = group["name"]
             is_review = bool(group.get("review", False))
             if is_review:
-                # Behavioral group: items are bare Paths.
-                for path in group.get("behavioral_paths", []):
-                    size = path.stat().st_size if path.is_file() else 0
-                    work.append((len(work), Path(path), size, None, group_name, True))
+                # Behavioral group: items are BehavioralMatch records. Trust
+                # the recorded size_bytes — for stale_dir matches, the dir's
+                # own st_size is 0 on most filesystems, so re-stat'ing would
+                # zero out the freed_bytes accounting.
+                matches: list[BehavioralMatch] = group.get("matches", [])
+                for match in matches:
+                    work.append((len(work), match.path, match.size_bytes, None, group_name, True))
             else:
                 signature: Signature = group["signature"]
                 for node in group["nodes"]:
