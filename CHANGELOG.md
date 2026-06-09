@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-06-09
+
+### Fixed
+- **Sweeper undercounted `freed_bytes` for `stale_dir` REVIEW deletions.** The CLI passed `behavioral_paths: [m.path for m in matches]` into `Sweeper.sweep`, which then re-derived size with `path.stat().st_size if path.is_file() else 0` — always zero for a directory. The rolled-up `BehavioralMatch.size_bytes` (computed by `Scanner._finalize_behavioral_matches`) was silently discarded, so the end-of-sweep "Moved to trash X" total and the JSONL `size_bytes` audit field both reported 0 for stale code projects. The sweeper now consumes the `matches` list directly and trusts the recorded size. New regression test in `tests/test_sweeper.py::test_sweeper_uses_recorded_size_for_stale_dir_review`.
+
+### Internal
+- **`make lint` now runs `mypy src/`.** AGENTS.md has long claimed "Strict mypy — annotate everything", but the makefile only ran `ruff`. The gate now matches the convention, and four pre-existing strict-mypy errors in `behavior.py`, `trail.py`, and `scanner.py` are fixed.
+
 ### Behavioral abandonment heuristics (NEW)
 - **`behaviors.yaml` catalog** ships four v1 rules that catch what signatures can't: Stale Code Project (180-day `.git/HEAD` mtime), Old Download (90-day file mtime under `**/Downloads/*`), Forgotten Archive (90-day file mtime, archive/installer extensions anywhere), Old Large ML Weights (180-day file mtime, weight extensions, ≥500 MB).
 - **REVIEW section in the proposal.** Behavioral matches appear under a clearly-labelled `🔍 Review` header below the structural `🗑  Garbage` groups. Never auto-checked, distinct color, and a typed-`yes` gate fires before any REVIEW item is swept.
